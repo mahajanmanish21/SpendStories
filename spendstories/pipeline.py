@@ -6,6 +6,7 @@ import calendar
 import csv
 import getpass
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -14,7 +15,7 @@ from .categorize import categorize, category_kinds, load_rules
 from .checks import run_checks
 from .extras import apply_extras, load_extras
 from .formatting import money, pct
-from .loaders import load_file
+from .loaders import load_bytes
 from .models import LoadResult, Transaction
 from .report import render_html
 
@@ -23,32 +24,49 @@ from .report import render_html
 class ReadOptions:
     sign: str = "auto"
     dayfirst: bool | None = None
-    pdf_passwords: list[str] = field(default_factory=list)
+    # (label, password) pairs to try on locked files, e.g. from the Keychain.
+    passwords: list[tuple[str, str]] = field(default_factory=list)
     interactive: bool = False
+    # Called with (file name, password) after a typed-in password works, to offer saving it.
+    on_new_password: Callable[[str, str], None] | None = None
 
 
 def read_statement(path: Path, opts: ReadOptions) -> LoadResult:
-    """Load one file, trying each known PDF password (and asking, if we may)."""
-    passwords = [None, *opts.pdf_passwords]
-    res = None
-    for pw in passwords:
-        res = load_file(path, sign=opts.sign, pdf_password=pw, dayfirst=opts.dayfirst)
-        if res.transactions or not any("password" in w for w in res.warnings):
+    """Load one file. Locked files are tried with every known password, then (if allowed) we ask."""
+    data = path.read_bytes()
+    res = load_bytes(path.name, data, opts.sign, None, opts.dayfirst)
+    if not res.locked:
+        return res
+    for label, pw in opts.passwords:
+        res = load_bytes(path.name, data, opts.sign, pw, opts.dayfirst)
+        if not res.locked:
+            res.unlocked_with = label
             return res
     if opts.interactive and sys.stdin.isatty():
-        pw = getpass.getpass(f"Password for {path.name}: ")
-        res = load_file(path, sign=opts.sign, pdf_password=pw, dayfirst=opts.dayfirst)
-        if res.transactions:
-            opts.pdf_passwords.append(pw)
+        for attempt in range(3):
+            pw = getpass.getpass(f"{path.name} is locked. Password (Enter to skip): ")
+            if not pw:
+                break
+            res = load_bytes(path.name, data, opts.sign, pw, opts.dayfirst)
+            if not res.locked:
+                res.unlocked_with = "typed"
+                opts.passwords.append(("typed", pw))  # try it on the next files too
+                if opts.on_new_password:
+                    opts.on_new_password(path.name, pw)
+                return res
+            print("  That password didn't open it." + (" Try again." if attempt < 2 else ""), file=sys.stderr)
     return res
 
 
 def describe_load(path: Path, res: LoadResult) -> str:
+    if res.locked:
+        return f"  🔒 {path.name}: locked, and none of your saved passwords open it"
     if not res.transactions:
         return f"  ✗ {path.name}: no transactions found" + (f" ({'; '.join(res.warnings)})" if res.warnings else "")
     dates = sorted(t.date for t in res.transactions)
     return (f"  ✓ {path.name}: {len(res.transactions)} transactions "
-            f"({dates[0]:%d %b %Y} – {dates[-1]:%d %b %Y}, {res.method})")
+            f"({dates[0]:%d %b %Y} – {dates[-1]:%d %b %Y}, {res.method}"
+            + (", unlocked" if getattr(res, "unlocked_with", None) else "") + ")")
 
 
 @dataclass

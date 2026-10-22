@@ -22,7 +22,7 @@ from pathlib import Path
 
 from .offline import block_network
 
-COMMANDS = ("init", "import", "inbox", "watch", "report", "status", "budget", "setup-mac")
+COMMANDS = ("init", "import", "inbox", "watch", "report", "status", "budget", "password", "setup-mac")
 
 STARTER_RULES = """\
 # My SpendStories rules. These are checked before the built-in rules, so they
@@ -54,8 +54,9 @@ def _reading_options(p: argparse.ArgumentParser) -> None:
                        help="force dd/mm/yyyy dates when ambiguous")
     dates.add_argument("--monthfirst", dest="dayfirst", action="store_false",
                        help="force mm/dd/yyyy dates when ambiguous")
-    p.add_argument("--pdf-password", action="append", default=[], metavar="PASSWORD",
-                   help="password for protected PDFs (repeatable; prompted if needed)")
+    p.add_argument("--password", "--pdf-password", dest="password", action="append", default=[], metavar="PASSWORD",
+                   help="password for locked statements, tried alongside your saved ones (repeatable). "
+                        "Better: save them once with 'spendstories password add'")
 
 
 def _report_options(p: argparse.ArgumentParser, default_output: str | None) -> None:
@@ -127,6 +128,16 @@ def build_library_parser() -> argparse.ArgumentParser:
     brm = bsub.add_parser("remove", help="remove a budget")
     brm.add_argument("category")
 
+    pwd = sub.add_parser("password", help="save passwords for locked statements (in your Mac's Keychain)")
+    psub = pwd.add_subparsers(dest="action")
+    padd = psub.add_parser("add", help="save a password (you'll be asked to type it; it isn't shown)")
+    padd.add_argument("label", nargs="?", help='a name to recognise it by, e.g. "hdfc card"')
+    psub.add_parser("list", help="show the labels of saved passwords (never the passwords)")
+    prm = psub.add_parser("remove", help="forget a saved password")
+    prm.add_argument("label")
+    ptest = psub.add_parser("test", help="check which saved password opens a file")
+    ptest.add_argument("file")
+
     mac = sub.add_parser("setup-mac", help="create the folders and a double-clickable 'Update Report' file")
     mac.add_argument("--auto", action="store_true",
                      help="also update automatically whenever a file lands in the Inbox (macOS LaunchAgent)")
@@ -168,8 +179,14 @@ def run_oneoff(args) -> int:
         print("error: no CSV/XLSX/XLS/PDF files found", file=sys.stderr)
         return 2
 
-    opts = ReadOptions(sign=args.sign, dayfirst=args.dayfirst,
-                       pdf_passwords=[*args.pdf_password, *config.pdf_passwords], interactive=True)
+    from .library import default_home
+    from .passwords import saved_passwords
+    home = default_home()
+    opts = ReadOptions(sign=args.sign, dayfirst=args.dayfirst, interactive=True,
+                       passwords=[*(("given", p) for p in args.password),
+                                  *(saved_passwords(home, config.pdf_passwords) if home.exists() else
+                                    [(f"config #{i}", p) for i, p in enumerate(config.pdf_passwords, 1)])],
+                       on_new_password=lambda name, pw: _offer_to_save(home, name, pw))
     transactions, notes = [], []
     for f in files:
         try:
@@ -181,6 +198,8 @@ def run_oneoff(args) -> int:
         notes += [f"{f.name}: {w}" for w in res.warnings]
         say(describe_load(f, res))
         transactions.extend(res.transactions)
+    if any("locked" in n for n in notes):
+        say("  Tip: save statement passwords once with: spendstories password add")
     if not transactions:
         print("error: no transactions could be read from the inputs", file=sys.stderr)
         return 1
@@ -239,12 +258,15 @@ def _rebuild(lib, args, say) -> int:
 def _import_files(lib, files: list[Path], args, say, move: bool) -> tuple[int, int]:
     """Import files; returns (transactions added, files that failed)."""
     from .library import config_passwords, file_away, file_sha256, import_transactions
+    from .passwords import saved_passwords
     from .pipeline import ReadOptions, describe_load, read_statement
 
-    opts = ReadOptions(sign=args.sign, dayfirst=args.dayfirst,
-                       pdf_passwords=[*args.pdf_password, *config_passwords(lib)],
-                       interactive=sys.stdin.isatty())
+    opts = ReadOptions(sign=args.sign, dayfirst=args.dayfirst, interactive=sys.stdin.isatty(),
+                       passwords=[*(("given", p) for p in args.password),
+                                  *saved_passwords(lib.home, config_passwords(lib))],
+                       on_new_password=lambda name, pw: _offer_to_save(lib.home, name, pw))
     added = failed = 0
+    locked: list[str] = []
     for f in files:
         try:
             sha = file_sha256(f)
@@ -256,6 +278,8 @@ def _import_files(lib, files: list[Path], args, say, move: bool) -> tuple[int, i
         if not res.transactions:
             say(describe_load(f, res))
             failed += 1
+            if res.locked:
+                locked.append(f.name)
             continue
         outcome = import_transactions(lib, f, res.transactions, res.method, sha)
         if outcome.status == "duplicate-file":
@@ -270,7 +294,47 @@ def _import_files(lib, files: list[Path], args, say, move: bool) -> tuple[int, i
         if move:
             when = max(t.date for t in res.transactions)
             file_away(lib, f, when)
+    if locked:
+        say(f"  {len(locked)} locked file(s) left in place. Save the password with: spendstories password add"
+            + (" (then run this again)" if sys.stdin.isatty() else ""))
+        if not sys.stdin.isatty():
+            _notify(f"{len(locked)} locked statement{'s' if len(locked) > 1 else ''} in your Inbox",
+                    "Open Terminal and run: spendstories password add")
     return added, failed
+
+
+def _offer_to_save(home: Path, filename: str, password: str) -> None:
+    """After a typed password works, offer to remember it (never without asking)."""
+    from .passwords import guess_label, store_for
+
+    store = store_for(home)
+    try:
+        answer = input(f"  Save this password ({store.name}) so locked statements open automatically next time? [Y/n] ")
+    except EOFError:
+        return
+    if answer.strip().lower() not in ("", "y", "yes"):
+        return
+    default = guess_label(filename)
+    label = input(f"  Label for it [{default}]: ").strip() or default
+    home.mkdir(parents=True, exist_ok=True)
+    try:
+        store.set(label, password)
+        print(f"  Saved as '{label}'.", file=sys.stderr)
+    except Exception as e:
+        print(f"  Couldn't save it: {e}", file=sys.stderr)
+
+
+def _notify(title: str, message: str) -> None:
+    """A Mac notification for when we run in the background (automatic Inbox)."""
+    if sys.platform != "darwin":
+        return
+    q = lambda v: '"' + v.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    try:
+        import subprocess
+        subprocess.run(["osascript", "-e", f"display notification {q(message)} with title {q('SpendStories')} subtitle {q(title)}"],
+                       capture_output=True, timeout=10)
+    except Exception:
+        pass
 
 
 def _stable_inbox_files(lib, wait: float = 2.0) -> list[Path]:
@@ -370,6 +434,10 @@ def run_library(argv: list[str]) -> int:
         gaps = [m for m in full if m not in months]
         if gaps:
             print(f"  No transactions at all in: {', '.join(gaps)} - a statement may be missing")
+        from .loaders import collect_files
+        waiting = collect_files([lib.inbox])
+        if waiting:
+            print(f"  Waiting in the Inbox (locked or unreadable): {', '.join(f.name for f in waiting)}")
         print("\n  Files")
         for f in st["files"]:
             print(f"    {f['name']:<40} {f['first_date'] or '':>10} – {f['last_date'] or '':<10} "
@@ -407,9 +475,63 @@ def run_library(argv: list[str]) -> int:
             print(f"  {b['category']:<32} {money(b['spent']):>12} of {money(b['budget']):>12}  {icon[b['status']]}")
         return 0
 
+    if args.command == "password":
+        return password_command(lib, args)
+
     if args.command == "setup-mac":
         return setup_mac(lib, args.auto)
     return 2
+
+
+def password_command(lib, args) -> int:
+    import getpass
+
+    from .passwords import store_for
+
+    store = store_for(lib.home)
+    action = args.action or "list"
+    if action == "add":
+        label = args.label or input('Label (e.g. "hdfc card"): ').strip()
+        if not label:
+            print("A label is needed so you can tell your passwords apart.", file=sys.stderr)
+            return 2
+        pw = getpass.getpass(f"Password for {label} (not shown): ")
+        if not pw:
+            print("Nothing saved.", file=sys.stderr)
+            return 1
+        if getpass.getpass("Type it again: ") != pw:
+            print("The two didn't match. Nothing saved.", file=sys.stderr)
+            return 1
+        store.set(label, pw)
+        print(f"Saved '{label}' in {store.name}. Locked statements will now open automatically.")
+        if collect_inbox := [f for f in lib.inbox.iterdir() if f.is_file() and not f.name.startswith(".")]:
+            print(f"{len(collect_inbox)} file(s) are waiting in the Inbox - run: spendstories inbox")
+        return 0
+    if action == "remove":
+        print(f"Removed '{args.label}'." if store.remove(args.label) else f"No saved password called '{args.label}'.")
+        return 0
+    if action == "test":
+        from .library import config_passwords
+        from .loaders import load_bytes
+        from .passwords import saved_passwords
+
+        f = Path(args.file)
+        data = f.read_bytes()
+        if not load_bytes(f.name, data).locked:
+            print(f"{f.name} isn't locked.")
+            return 0
+        for label, pw in saved_passwords(lib.home, config_passwords(lib)):
+            if not load_bytes(f.name, data, password=pw).locked:
+                print(f"{f.name} opens with '{label}'.")
+                return 0
+        print(f"None of your saved passwords open {f.name}. Add one with: spendstories password add")
+        return 1
+    labels = store.labels()
+    print(f"Saved passwords ({store.name}):" if labels else
+          f"No saved passwords. Add one with: spendstories password add   (stored in {store.name})")
+    for l in labels:
+        print(f"  • {l}")
+    return 0
 
 
 def setup_mac(lib, auto: bool) -> int:

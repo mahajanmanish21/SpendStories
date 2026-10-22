@@ -610,3 +610,159 @@ def test_report_edits_round_trip_through_library(tmp_path, no_net_leak):
     built = build(read_transactions(lib), [lib.rules_path], True, load_config(lib.config_path).budgets)
     taj = next(t for t in built.transactions if "TAJ" in t.description)
     assert taj.tags == ["Goa trip"] and taj.amount == 13400 and taj.share == 0.5
+
+
+# ---------------------------------------------------------------- locked statements
+
+def _locked_pdf(path, password):
+    canvas_mod = pytest.importorskip("reportlab.pdfgen.canvas")
+    c = canvas_mod.Canvas(str(path), encrypt=password)
+    for i, (d, desc, amt) in enumerate([("02 Jan 2026", "SWIGGY BANGALORE", "450.00"),
+                                         ("05 Jan 2026", "AMAZON PAY INDIA", "1,299.00"),
+                                         ("09 Jan 2026", "PAYMENT RECEIVED", "1,749.00 Cr")]):
+        c.drawString(40, 780 - 16 * i, d); c.drawString(130, 780 - 16 * i, desc); c.drawRightString(550, 780 - 16 * i, amt)
+    c.save()
+
+
+def _locked_xlsx(path, password):
+    pytest.importorskip("msoffcrypto")
+    import msoffcrypto.format.ooxml
+    from openpyxl import Workbook
+    import io as _io
+    wb = Workbook(); ws = wb.active
+    for row in [["Txn Date", "Narration", "Withdrawal Amt", "Deposit Amt"],
+                ["03/01/26", "BESCOM ELECTRICITY", 1800, None], ["04/01/26", "SALARY ACME", None, 90000]]:
+        ws.append(row)
+    plain = _io.BytesIO(); wb.save(plain); plain.seek(0)
+    with open(path, "wb") as out:
+        msoffcrypto.format.ooxml.OOXMLFile(plain).encrypt(password, out)  # noqa: F821
+
+
+def test_locked_pdf_and_excel(tmp_path):
+    pdf, xlsx = tmp_path / "card_jan.pdf", tmp_path / "bank_jan.xlsx"
+    _locked_pdf(pdf, "ABCD0101")
+    _locked_xlsx(xlsx, "s3cret")
+    for f, pw, n in [(pdf, "ABCD0101", 3), (xlsx, "s3cret", 2)]:
+        assert load_file(f).locked
+        assert load_file(f, password="wrong").locked
+        res = load_file(f, password=pw)
+        assert not res.locked and len(res.transactions) == n, f.name
+    assert [t.amount for t in load_file(pdf, password="ABCD0101").transactions] == [450.0, 1299.0, -1749.0]
+    assert load_file(pdf, pdf_password="ABCD0101").transactions   # old keyword still works
+
+
+def test_locked_zip(tmp_path):
+    import shutil, subprocess
+    if not shutil.which("zip"):
+        pytest.skip("zip command not available")
+    (tmp_path / "in").mkdir()
+    (tmp_path / "in" / "stmt.csv").write_text("Date,Description,Amount\n01/01/2026,UBER,10\n02/01/2026,ZOMATO,20\n")
+    z = tmp_path / "statement.zip"
+    subprocess.run(["zip", "-j", "-q", "-P", "zippw", str(z), str(tmp_path / "in" / "stmt.csv")], check=True)
+    assert load_file(z).locked
+    assert [t.amount for t in load_file(z, password="zippw").transactions] == [10.0, 20.0]
+
+
+def test_read_statement_tries_saved_passwords(tmp_path):
+    from spendstories.pipeline import ReadOptions, read_statement
+
+    pdf = tmp_path / "hdfc_cc_jan.pdf"
+    _locked_pdf(pdf, "ABCD0101")
+    res = read_statement(pdf, ReadOptions(passwords=[("icici", "nope"), ("hdfc", "ABCD0101")]))
+    assert not res.locked and res.unlocked_with == "hdfc" and len(res.transactions) == 3
+    assert read_statement(pdf, ReadOptions(passwords=[("icici", "nope")])).locked
+
+
+def test_file_password_store(tmp_path, monkeypatch):
+    from spendstories.passwords import FileStore, guess_label, saved_passwords, store_for
+
+    monkeypatch.setenv("SPENDSTORIES_PASSWORD_STORE", "file")
+    store = store_for(tmp_path)
+    assert isinstance(store, FileStore)
+    store.set("hdfc card", 'pa"ss\\word')
+    store.set("icici", "two")
+    assert (tmp_path / "passwords.toml").stat().st_mode & 0o777 == 0o600
+    assert store.get("hdfc card") == 'pa"ss\\word'
+    assert saved_passwords(tmp_path, ["fromconfig"]) == [("hdfc card", 'pa"ss\\word'), ("icici", "two"),
+                                                         ("config #1", "fromconfig")]
+    assert store.remove("icici") and store.labels() == ["hdfc card"]
+    assert guess_label("HDFC_CC_Statement_Oct2026.pdf") == "hdfc"
+    assert guess_label("Acct Statement_XX1234_15102026.pdf") == "statements"
+
+
+def test_keychain_store_keeps_password_off_the_command_line(tmp_path, monkeypatch):
+    from spendstories import passwords
+
+    calls = []
+
+    class R:
+        returncode, stdout, stderr = 0, "secret-from-keychain\n", ""
+
+    def fake_run(argv, **kw):
+        calls.append((argv, kw.get("input")))
+        return R()
+
+    monkeypatch.setattr(passwords.subprocess, "run", fake_run)
+    kc = passwords.KeychainStore(tmp_path)
+    kc.set("hdfc card", "MyP@ss")
+    argv, stdin = calls[-1]
+    assert argv == ["security", "-i"] and "MyP@ss" not in " ".join(argv)
+    assert '-a "hdfc card"' in stdin and '-w "MyP@ss"' in stdin and '-s "SpendStories"' in stdin
+    assert kc.labels() == ["hdfc card"]
+    assert "MyP@ss" not in (tmp_path / "password-labels.txt").read_text()   # only labels on disk
+    assert kc.get("hdfc card") == "secret-from-keychain"
+    assert calls[-1][0][:2] == ["security", "find-generic-password"]
+
+
+def test_inbox_with_locked_statements(tmp_path, monkeypatch, capsys, no_net_leak):
+    from spendstories.cli import main
+    from spendstories.library import Library, read_transactions
+    from spendstories.passwords import store_for
+
+    monkeypatch.setenv("SPENDSTORIES_PASSWORD_STORE", "file")
+    home = tmp_path / "lib"
+    main(["--home", str(home), "init"])
+    lib = Library(home)
+    _locked_pdf(lib.inbox / "hdfc_jan.pdf", "ABCD0101")
+    (lib.inbox / "open.csv").write_text("Date,Description,Amount\n10/01/2026,UBER,10\n")
+
+    capsys.readouterr()
+    main(["--home", str(home), "inbox"])
+    err = capsys.readouterr().err
+    assert "locked" in err and "spendstories password add" in err
+    assert (lib.inbox / "hdfc_jan.pdf").exists() and not (lib.inbox / "open.csv").exists()
+    main(["--home", str(home), "status"])
+    assert "Waiting in the Inbox" in capsys.readouterr().out
+
+    store_for(home).set("hdfc", "ABCD0101")
+    assert main(["--home", str(home), "password", "test", str(lib.inbox / "hdfc_jan.pdf")]) == 0
+    assert "opens with 'hdfc'" in capsys.readouterr().out
+    main(["--home", str(home), "inbox", "-q"])
+    assert not (lib.inbox / "hdfc_jan.pdf").exists()
+    assert len(read_transactions(lib)) == 4
+    main(["--home", str(home), "password", "list"])
+    out = capsys.readouterr().out
+    assert "hdfc" in out and "ABCD0101" not in out
+
+
+def test_prompted_password_is_offered_for_saving(tmp_path, monkeypatch, no_net_leak):
+    from spendstories import pipeline
+    from spendstories.cli import main
+    from spendstories.passwords import store_for
+
+    monkeypatch.setenv("SPENDSTORIES_PASSWORD_STORE", "file")
+    monkeypatch.setenv("SPENDSTORIES_HOME", str(tmp_path / "lib"))
+    (tmp_path / "lib").mkdir()
+    pdf = tmp_path / "ICICI_Statement_Jan.pdf"
+    _locked_pdf(pdf, "ABCD0101")
+    typed = iter(["wrong", "ABCD0101"])
+    monkeypatch.setattr(pipeline.getpass, "getpass", lambda prompt="": next(typed))
+    monkeypatch.setattr(pipeline.sys.stdin, "isatty", lambda: True)
+    answers = iter(["", ""])                       # "Save it? [Y/n]" -> yes; label -> default
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+    assert main([str(pdf), "-o", str(tmp_path / "r.html"), "-q"]) == 0
+    assert store_for(tmp_path / "lib").get("icici") == "ABCD0101"
+
+    # Next time it opens without asking.
+    monkeypatch.setattr(pipeline.getpass, "getpass", lambda prompt="": pytest.fail("should not ask again"))
+    assert main([str(pdf), "-o", str(tmp_path / "r2.html"), "-q"]) == 0

@@ -31,3 +31,6 @@ class LoadResult:
     transactions: list[Transaction] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     method: str = ""
+    # True when the file is password-protected and no password we tried opened it.
+    locked: bool = False
+    unlocked_with: str | None = None   # label of the password that opened it

@@ -18,7 +18,8 @@ from pathlib import Path
 from .models import LoadResult, Transaction
 from .parsing import DATE_TOKEN, detect_dayfirst, parse_amount, parse_date
 
-SUPPORTED_EXTENSIONS = {".csv", ".tsv", ".txt", ".xlsx", ".xlsm", ".xls", ".pdf"}
+SUPPORTED_EXTENSIONS = {".csv", ".tsv", ".txt", ".xlsx", ".xlsm", ".xls", ".pdf", ".zip"}
+OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"  # encrypted Office files are OLE containers
 
 # Column-name aliases, most specific first. Matching is on a normalised header.
 ROLE_ALIASES: dict[str, list[str]] = {
@@ -229,8 +230,11 @@ def _finalise(parsed, source, sign, warnings) -> list[Transaction]:
 
 # --------------------------------------------------------------------------- CSV / Excel
 
-def _read_csv_rows(path: Path) -> list[list[str]]:
-    raw = path.read_bytes()
+class Locked(Exception):
+    """The file needs a password we don't have (or the one given is wrong)."""
+
+
+def _read_csv_rows(raw: bytes, ext: str) -> list[list[str]]:
     for enc in ("utf-8-sig", "cp1252", "latin-1"):
         try:
             text = raw.decode(enc)
@@ -242,16 +246,44 @@ def _read_csv_rows(path: Path) -> list[list[str]]:
         dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
         delimiter = dialect.delimiter
     except csv.Error:
-        delimiter = "\t" if path.suffix.lower() == ".tsv" else ","
+        delimiter = "\t" if ext == ".tsv" else ","
     return [row for row in csv.reader(io.StringIO(text), delimiter=delimiter)]
 
 
-def _read_excel_sheets(path: Path) -> list[list[list]]:
-    if path.suffix.lower() == ".xls":
+def _unlock_office(data: bytes, password: str | None) -> bytes:
+    """Decrypt a password-protected Excel file in memory. Unlocked files pass straight through."""
+    if not data.startswith(OLE_MAGIC):
+        return data  # a normal .xlsx (zip); can't be encrypted
+    try:
+        import msoffcrypto
+    except ImportError:
+        raise RuntimeError("this Excel file may be locked; opening locked Excel files needs the "
+                           "'msoffcrypto-tool' package (pip install msoffcrypto-tool)") from None
+    try:
+        office = msoffcrypto.OfficeFile(io.BytesIO(data))
+        if not office.is_encrypted():
+            return data
+    except Exception:
+        return data  # not something msoffcrypto understands; let the Excel reader try
+    # "VelvetSweatshop" is Excel's built-in key for files that are only write-protected.
+    for pw in ([password] if password else []) + ["VelvetSweatshop"]:
+        try:
+            office = msoffcrypto.OfficeFile(io.BytesIO(data))
+            office.load_key(password=pw)
+            out = io.BytesIO()
+            office.decrypt(out)
+            return out.getvalue()
+        except Exception:
+            continue
+    raise Locked()
+
+
+def _read_excel_sheets(data: bytes, ext: str) -> list[list[list]]:
+    if ext == ".xls" or data.startswith(OLE_MAGIC):
         import pandas as pd  # needs xlrd for legacy .xls
 
         try:
-            sheets = pd.read_excel(path, sheet_name=None, header=None, dtype=object)
+            sheets = pd.read_excel(io.BytesIO(data), sheet_name=None, header=None, dtype=object)
         except ImportError as e:
             raise RuntimeError("legacy .xls needs the 'xlrd' package (pip install xlrd), "
                                "or re-save the file as .xlsx/.csv") from e
@@ -259,7 +291,7 @@ def _read_excel_sheets(path: Path) -> list[list[list]]:
 
     from openpyxl import load_workbook
 
-    wb = load_workbook(path, read_only=True, data_only=True)
+    wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
     sheets = []
     for ws in wb.worksheets:
         sheets.append([["" if c is None else c for c in row] for row in ws.iter_rows(values_only=True)])
@@ -360,17 +392,28 @@ def _extract_pdf_text(pages, source, sign) -> tuple[list[Transaction], list[str]
     return _finalise(parsed, source, sign, warnings), warnings
 
 
-def _load_pdf(path: Path, source: str, sign: str, password: str | None) -> LoadResult:
+def _is_password_error(e: BaseException) -> bool:
+    # pdfplumber wraps pdfminer's PDFPasswordIncorrect, so look through the chain.
+    seen = 0
+    while e is not None and seen < 5:
+        if "password" in type(e).__name__.lower() or "password" in str(e).lower() or "decrypt" in str(e).lower():
+            return True
+        inner = e.args[0] if e.args and isinstance(e.args[0], BaseException) else None
+        e = inner or e.__cause__ or e.__context__
+        seen += 1
+    return False
+
+
+def _load_pdf(data: bytes, source: str, sign: str, password: str | None) -> LoadResult:
     import pdfplumber
 
     result = LoadResult(source=source)
     try:
-        pdf = pdfplumber.open(path, password=password or "")
-    except Exception as e:  # pdfminer raises several types for bad passwords
-        name = type(e).__name__
-        if "Password" in name or "password" in str(e).lower():
-            result.warnings.append("PDF is password protected; pass --pdf-password")
-            return result
+        pdf = pdfplumber.open(io.BytesIO(data), password=password or "")
+        pdf.pages  # forces decryption, so a wrong password fails here
+    except Exception as e:
+        if _is_password_error(e):
+            raise Locked() from None
         raise
     with pdf:
         pages = list(pdf.pages)
@@ -398,20 +441,74 @@ def _load_pdf(path: Path, source: str, sign: str, password: str | None) -> LoadR
 
 # --------------------------------------------------------------------------- entry point
 
-def load_file(path: str | Path, sign: str = "auto", pdf_password: str | None = None,
-              dayfirst: bool | None = None) -> LoadResult:
-    path = Path(path)
-    source = path.stem
-    ext = path.suffix.lower()
-    if ext == ".pdf":
-        return _load_pdf(path, source, sign, pdf_password)
+LOCKED_NOTE = "locked: needs a password"
 
+
+def load_file(path: str | Path, sign: str = "auto", password: str | None = None,
+              dayfirst: bool | None = None, pdf_password: str | None = None) -> LoadResult:
+    """Read one statement. Locked files come back with ``locked=True`` instead of raising."""
+    path = Path(path)
+    return load_bytes(path.name, path.read_bytes(), sign, password if password is not None else pdf_password,
+                      dayfirst)
+
+
+def load_bytes(name: str, data: bytes, sign: str = "auto", password: str | None = None,
+               dayfirst: bool | None = None) -> LoadResult:
+    # Everything works on bytes in memory, so an unlocked statement is never written to disk.
+    stem, ext = Path(name).stem, Path(name).suffix.lower()
+    try:
+        if ext == ".zip":
+            return _load_zip(name, data, sign, password, dayfirst)
+        if ext == ".pdf":
+            return _load_pdf(data, stem, sign, password)
+        return _load_table(stem, ext, data, sign, password, dayfirst)
+    except Locked:
+        return LoadResult(source=stem, warnings=[LOCKED_NOTE], locked=True)
+
+
+def _load_zip(name: str, data: bytes, sign: str, password: str | None, dayfirst: bool | None) -> LoadResult:
+    """Statements emailed as a (possibly password-protected) zip."""
+    import zipfile
+
+    result = LoadResult(source=Path(name).stem, method="zip")
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile:
+        raise RuntimeError("not a valid zip file") from None
+    members = [m for m in zf.infolist() if not m.is_dir() and not m.filename.startswith("__MACOSX")
+               and Path(m.filename).suffix.lower() in SUPPORTED_EXTENSIONS - {".zip"}
+               and not Path(m.filename).name.startswith((".", "~$"))]
+    for m in members:
+        try:
+            inner = zf.read(m, pwd=password.encode() if password else None)
+        except RuntimeError as e:  # "File ... is encrypted, password required" / "Bad password"
+            if "password" in str(e).lower() or "encrypted" in str(e).lower():
+                raise Locked() from None
+            raise
+        except NotImplementedError:
+            raise RuntimeError("this zip uses AES encryption, which can't be opened here yet. "
+                               "Double-click it to unzip on your Mac, then add the files inside") from None
+        # A locked PDF inside a locked zip usually shares the password.
+        sub = load_bytes(Path(m.filename).name, inner, sign, password, dayfirst)
+        if sub.locked:
+            raise Locked()
+        result.transactions.extend(sub.transactions)
+        result.warnings.extend(f"{Path(m.filename).name}: {w}" for w in sub.warnings)
+        if sub.method:
+            result.method = f"zip/{sub.method}"
+    if not members:
+        result.warnings.append("no statements (CSV, Excel, PDF) inside the zip")
+    return result
+
+
+def _load_table(source: str, ext: str, data: bytes, sign: str, password: str | None,
+                dayfirst: bool | None) -> LoadResult:
     result = LoadResult(source=source)
     if ext in (".xlsx", ".xlsm", ".xls"):
-        sheets = _read_excel_sheets(path)
+        sheets = _read_excel_sheets(_unlock_office(data, password), ext)
         result.method = "excel"
     else:
-        sheets = [_read_csv_rows(path)]
+        sheets = [_read_csv_rows(data, ext)]
         result.method = "csv"
     for rows in sheets:
         txns, warns = extract_from_rows(rows, source, sign, dayfirst)

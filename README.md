@@ -43,7 +43,7 @@ Installing is the only step that uses the internet. After that, everything runs 
   Imported/2026-10/…     ← statements move here once they're in your history
   report.html            ← your report (open it any time)
   rules.toml             ← your categories, tags and shared-expense splits
-  config.toml            ← currency, budgets, PDF passwords
+  config.toml            ← currency and budgets
   spendstories.db        ← every transaction you've ever imported
 ```
 
@@ -73,11 +73,42 @@ are both kept. Importing the same file twice does nothing.
 | `spendstories status` | What's in your history: files, date range, months with no transactions |
 | `spendstories budget set "Shopping" 10000` | Set a monthly budget (`budget list`, `budget remove …`) |
 | `spendstories watch` | Keep running and import files as they land (alternative to `--auto`) |
+| `spendstories password add / list / test / remove` | Save passwords for locked statements (see below) |
 | `spendstories setup-mac [--auto]` | Create the folders and the double-clickable updater |
 | `spendstories --home PATH …` | Use a library somewhere other than `~/SpendStories` |
 
-Protected PDFs: add `pdf_passwords = ["…"]` to `config.toml` so the Inbox can open them
-without asking. That file stays on your Mac.
+### Locked (password-protected) statements
+
+Many banks lock their statements with a password. SpendStories opens locked **PDF**,
+**Excel** (.xlsx/.xls) and **ZIP** files. Save each password once:
+
+```bash
+spendstories password add "hdfc card"      # you type the password; it isn't shown
+spendstories password list                 # shows labels only, never the passwords
+spendstories password test ~/Downloads/statement.pdf   # which saved password opens it?
+spendstories password remove "hdfc card"
+```
+
+- **Where passwords go:** on a Mac, in your **login Keychain**, encrypted by macOS. You
+  can see them in the Keychain Access app under "SpendStories". SpendStories only keeps the
+  labels. On other systems they go in `~/SpendStories/passwords.toml`, readable only by you.
+- **How they're used:** every locked file is tried with each saved password, so you don't
+  have to say which bank a file is from. Passwords are never printed, logged or put in the
+  database.
+- **Unlocked contents stay in memory.** A decrypted statement is never written to disk.
+  Only its transactions go into your history. The original locked file is filed away
+  unchanged.
+- **New password while running by hand:** you're asked for it (up to three tries), then
+  asked whether to save it, with a suggested label based on the file name (e.g. "icici").
+- **Automatic Inbox (`--auto`):** it can't ask, so a locked file it can't open stays in the
+  Inbox and you get a Mac notification. Run `spendstories password add`, then
+  `spendstories inbox`. `spendstories status` lists anything still waiting.
+- **Limits:** ZIPs using AES encryption can't be opened here; double-click to unzip them in
+  Finder and add the files inside. Scanned (image-only) PDFs can't be read even when
+  unlocked.
+- **Your history isn't encrypted.** Transactions stored in `~/SpendStories` are
+  readable by your user account only. Keep FileVault (disk encryption) on, as it is by
+  default on recent Macs.
 
 ### One-off reports
 
@@ -94,7 +125,7 @@ spendstories statements/ --currency ₹ --open     # writes spend_report.html
 | `--rules my_rules.toml` | Your own rules (categories, tags, splits), checked before the built-in ones |
 | `--config config.toml` | Currency and budgets |
 | `--currency ₹` | Currency symbol shown in the report |
-| `--pdf-password …` | Password for protected PDF statements (you're asked for it if it's needed) |
+| `--password …` | Password for a locked statement, tried alongside your saved ones (you're asked if none work) |
 | `--dayfirst` / `--monthfirst` | Force how ambiguous dates like 03/04/2026 are read (normally guessed per file) |
 | `--sign negative-spend` | For a file with a single signed Amount column, say which sign means spending |
 | `--no-dedupe` | Keep identical rows that appear in more than one file |

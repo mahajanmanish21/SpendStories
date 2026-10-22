@@ -34,8 +34,8 @@ STARTER_CONFIG = """\
 # Currency symbol shown in reports, e.g. "₹", "$", "€". Leave empty for none.
 currency = ""
 
-# Passwords to try for protected PDF statements (this file stays on your computer).
-# pdf_passwords = ["..."]
+# Locked statements: save their passwords with  spendstories password add
+# (kept in your Mac's Keychain, not in this file).
 
 # Monthly budgets. Use category names exactly as they appear in the report.
 # "All spending" is a budget for everything together.
@@ -262,7 +262,8 @@ def load_config(path: Path | None) -> Config:
         except (TypeError, ValueError):
             raise ValueError(f"{path}: budget for {k!r} must be a number") from None
     return Config(currency=str(data.get("currency") or ""), budgets=budgets,
-                  pdf_passwords=[str(p) for p in data.get("pdf_passwords") or []])
+                  # Plain-text fallback; `spendstories password add` is the better place.
+                  pdf_passwords=[str(p) for p in [*(data.get("passwords") or []), *(data.get("pdf_passwords") or [])]])
 
 
 def config_passwords(lib: Library) -> list[str]:
