@@ -54,6 +54,12 @@ def generate(out: Path, start: date = date(2025, 11, 1), n_months: int = 12, see
         card_a.append((day(y, m, 15), "INDIAN OIL PETROL PUMP", rng.uniform(2500, 3200)))
         if m == 12:  # festive season gifting
             card_a.append((day(y, m, 20), "FERNS N PETALS GIFT", 4200.0))
+        if i >= 9:  # a subscription that started recently
+            card_a.append((day(y, m, 17), "YOUTUBE PREMIUM GOOGLE", 129.0))
+        if (y, m) == (2026, 9):  # paid the bill late once...
+            card_a += [(day(y, m, 5), "LATE PAYMENT FEE", 750.0), (day(y, m, 5), "IGST ON LATE PAYMENT FEE", 135.0)]
+        if (y, m) == (2026, 10):  # ...and paid interest on the carried balance
+            card_a.append((day(y, m, 4), "FINANCE CHARGES", 1240.0))
         prev_total = sum(a for d, _, a in card_a if (d.year, d.month) == (y, m))
         card_a.append((day(y, m, 26), "PAYMENT RECEIVED - THANK YOU", -round(prev_total, 2)))
 
@@ -68,6 +74,10 @@ def generate(out: Path, start: date = date(2025, 11, 1), n_months: int = 12, see
             card_b += [(day(y, m, 11), "APPLE STORE BKC", 89900.0), (day(y, m, 19), "AMAZON PAY INDIA REFUND", -2399.0)]
         if i % 3 == 0:
             card_b.append((day(y, m, 12), "APOLLO PHARMACY", rng.uniform(800, 1800)))
+        if (y, m) == (2026, 6):  # charged twice?
+            card_b += [(day(y, m, 12), "DECATHLON SPORTS INDIA", 2499.0), (day(y, m, 13), "DECATHLON SPORTS INDIA", 2499.0)]
+        if (y, m) == (2026, 3):  # a purchase in dollars, with the card's markup
+            card_b += [(day(y, m, 8), "AWS EMEA USD 12.00", 1015.0), (day(y, m, 8), "FOREX MARKUP FEE", 35.5)]
 
         # --- bank account
         bank.append((day(y, m, 1), "NEFT CR-ACME TECH PVT LTD-SALARY NOV", 0, 185000.0))

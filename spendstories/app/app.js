@@ -62,10 +62,20 @@ const movingAvg = (y, w) => y.map((_, i) => i < w - 1 ? null : mean(y.slice(i - 
 
 // ------------------------------------------------------------------ data
 const KINDS = Object.assign({}, RAW.kinds);
-let overrides = store.get('overrides', {});
+let overrides = store.get('overrides', {});        // merchant -> category
+let txedits = store.get('txedits', {});            // transaction id -> {tags, share}
+let budgetEdits = store.get('budgets', {});        // category -> amount (null = removed)
+let dismissed = store.get('dismissed', {});        // check key -> true
 const TX = RAW.txns.map((r, i) => ({
   i, d: r[0], m: r[0].slice(0, 7), t: r[1], a: r[2], c0: r[3], k0: r[4], mer: r[5], s: RAW.sources[r[6]], c: r[3], k: r[4],
+  id: r[7] || 'r' + i, tags0: r[8] || [], share0: r[9] == null ? 1 : r[9], orig: r[10] == null ? r[2] : r[10], tags: r[8] || [], share: r[9] == null ? 1 : r[9],
 }));
+const TXID = new Map(TX.map(t => [t.id, t]));
+let BUDGETS = {};
+function applyBudgets() {
+  BUDGETS = Object.assign({}, RAW.budgets || {});
+  for (const [k, v] of Object.entries(budgetEdits)) { if (v == null) delete BUDGETS[k]; else BUDGETS[k] = v; }
+}
 const isSpend = t => t.k === 'expense' || t.k === 'refund';
 const ORIG_CAT = {};
 for (const t of TX) if (!(t.mer in ORIG_CAT)) ORIG_CAT[t.mer] = t.c0;
@@ -77,8 +87,17 @@ function kindFor(t) {
 }
 function applyOverrides() {
   for (const k in overrides) if (!(overrides[k] in KINDS)) KINDS[overrides[k]] = 'expense';
-  for (const t of TX) { t.c = overrides[t.mer] || t.c0; t.k = kindFor(t); }
+  for (const t of TX) {
+    const e = txedits[t.id];
+    t.tags = e && e.tags ? e.tags : t.tags0;
+    t.share = e && e.share != null ? e.share : t.share0;
+    t.a = Math.round(t.orig * t.share * 100) / 100;
+    t.c = overrides[t.mer] || t.c0; t.k = kindFor(t);
+  }
+  applyBudgets();
 }
+const allTags = () => [...new Set(TX.flatMap(t => t.tags))].sort((a, b) => a.localeCompare(b));
+const nChanges = () => Object.keys(overrides).length + Object.keys(txedits).length + Object.keys(budgetEdits).length;
 
 function monthRange(a, b) {
   const out = [];
@@ -264,6 +283,7 @@ const catHref = c => '#/category/' + encodeURIComponent(c);
 const merHref = m => '#/merchant/' + encodeURIComponent(m);
 const monthHref = m => '#/month/' + m;
 const txHref = p => '#/transactions?' + new URLSearchParams(p).toString();
+const tagHref = g => '#/tag/' + encodeURIComponent(g);
 
 // ------------------------------------------------------------------ chart primitives
 let CH = {}, chSeq = 0;
@@ -464,6 +484,13 @@ function noData(msg) {
 // ------------------------------------------------------------------ highlights
 function highlights() {
   const H = [], o = D.overall, W = S.window;
+  for (const b of budgetAlerts(LAST_MONTH).slice(0, 3)) {
+    H.push({ ic: b.status === 'over' ? '✗' : '!', cls: 'up', go: '#/budgets',
+      text: b.status === 'over' ? `<b>${esc(b.cat)}</b> is over budget in ${mLabel(LAST_MONTH)}: ${money(b.spent, true)} of ${money(b.limit, true)}.`
+        : `<b>${esc(b.cat)}</b> is heading over budget: ${money(b.spent, true)} of ${money(b.limit, true)} so far, on pace for ${money(b.projected, true)}.` });
+  }
+  const openChecks = (RAW.checks || []).filter(c => c.severity === 'warn' && !dismissed[checkKey(c)]);
+  if (openChecks.length) H.push({ ic: '⚑', cls: 'up', go: '#/checks', text: `${plural(openChecks.length, 'thing')} worth a look: ${openChecks.slice(0, 2).map(c => esc(c.title)).join('; ')}${openChecks.length > 2 ? '…' : ''}` });
   if (o.n >= 3) {
     if (Math.abs(o.slopePct) >= 0.02) {
       H.push({ ic: o.slope > 0 ? '▲' : '▼', cls: o.slope > 0 ? 'up' : 'down', go: '#/trends',
@@ -517,6 +544,7 @@ VIEWS.overview = () => {
       o.n >= 3 ? `per month (${pct(o.slopePct, true)}) · see trends ›` : 'needs 3+ months', '#/trends'),
     tile(`${mLabel(D.months[last])}`, money(lastV, true), D.avgMonth ? `${delta(lastV - D.avgMonth, D.avgMonth, true)} vs average` : '', monthHref(D.months[last])),
   ];
+  if (BUDGETS['All spending']) { const b = budgetRow('All spending', BUDGETS['All spending'], LAST_MONTH); tiles.splice(3, 0, tile(`Budget · ${mLabel(LAST_MONTH)}`, `${money(b.spent, true)} <span class="small faint">of ${money(b.limit, true)}</span>`, bBadge(b.status), '#/budgets')); }
   if (D.income) tiles.push(tile('Income', money(D.income, true), D.invested ? `${money(D.invested, true)} invested` : ''));
   if (D.income) { const left = D.income - D.spendTotal - D.invested; tiles.push(tile('Left over', `<span class="${left < 0 ? 'up' : ''}">${money(left, true)}</span>`, `${pct(left / D.income)} of income`)); }
 
@@ -809,8 +837,12 @@ VIEWS.month = mo => {
     tile('Spikes', String(spikes.length), spikes.length ? spikes.map(s => esc(s.cat)).join(', ') : 'nothing unusual'),
   ];
   const id = 'month:' + mo; TXFIX[id] = { month: mo };
-  return `${head}<div class="head-row"><h1>${mLong(mo)}</h1>${nav}</div>
-  <div class="tiles">${tiles.join('')}</div>
+  const brows = Object.keys(BUDGETS).map(c => budgetRow(c, BUDGETS[c], mo));
+  const budgetsHtml = brows.length ? `<h2>Budgets</h2><div class="card scroll"><table><tbody>${brows.map(b => `<tr><td>${b.cat === 'All spending' ? '<b>All spending</b>' : `<span class="name">${sw(b.cat)}${esc(b.cat)}</span>`}</td><td style="min-width:110px">${meter(b)}</td><td class="num">${money(b.spent)} <span class="faint">of ${money(b.limit)}</span></td><td>${bBadge(b.status)}</td></tr>`).join('')}</tbody></table></div>` : '';
+  const tagged = [...new Set(mtx.flatMap(t => t.tags))];
+  return `${head}<div class="head-row"><h1>${mLong(mo)}</h1><span class="pager">${nav}<button class="btn no-print" data-print>Print summary</button></span></div>
+  <div class="tiles">${tiles.join('')}</div>${budgetsHtml}
+  ${tagged.length ? `<p class="small" style="margin-top:12px">Tags this month: ${tagged.map(g => `<a class="tag" href="${tagHref(g)}">#${esc(g)}</a>`).join(' ')}</p>` : ''}
   <h2>Compared with an average month</h2><p class="desc">How much more (red) or less (green) you spent on each category than usual.</p>
   <div class="card">${top.length ? slot(w => divergingBars({ width: w, label: 'Category vs average', items: top.map(x => ({ name: x.c.name, value: x.diff, go: catHref(x.c.name),
     tip: `<b>${esc(x.c.name)}</b><div class="r"><span>${esc(mLabel(mo))}</span><span>${esc(money(x.v))}</span></div><div class="r"><span>Average month</span><span>${esc(money(x.c.stats.avg))}</span></div><div class="hint">Click to explore</div>` })) })) : '<p class="muted">A very ordinary month.</p>'}</div>
@@ -818,32 +850,182 @@ VIEWS.month = mo => {
     <div class="card"><h3>Biggest purchases</h3><table><tbody>${spendTx.map(t => `<tr class="link" data-go="${esc(merHref(t.mer))}"><td><span class="trunc">${esc(t.t)}</span><div class="small faint">${dLabel(t.d)} · ${esc(t.c)}</div></td><td class="num">${money(t.a)}</td></tr>`).join('') || '<tr><td class="muted">None</td></tr>'}</tbody></table></div>
     <div class="card"><h3>First time this month</h3>${firstSeen.length ? `<table><tbody>${firstSeen.map(m => `<tr class="link" data-go="${esc(merHref(m.name))}"><td><a href="${merHref(m.name)}">${esc(title(m.name))}</a><div class="small faint">${esc(m.category)}</div></td><td class="num">${money(m.values[i])}</td></tr>`).join('')}</tbody></table>` : '<p class="small muted">No new merchants.</p>'}</div>
   </div>
-  <h2>All transactions in ${mLong(mo)}</h2>${txTable(id)}`;
+  <div class="print-break"></div><h2>All transactions in ${mLong(mo)}</h2>${txTable(id)}`;
 };
 
 VIEWS.transactions = (_, params) => {
   const id = 'all';
-  const f = S.tx[id] = S.tx[id] || { q: '', cat: '', kind: '', month: '', sort: 'd', dir: -1, limit: 200 };
-  if (params) { for (const k of ['cat', 'kind', 'month', 'q']) if (params.has(k)) f[k] = params.get(k); }
+  const f = S.tx[id] = S.tx[id] || { q: '', cat: '', kind: '', month: '', tag: '', sort: 'd', dir: -1, limit: 200 };
+  if (params) { for (const k of ['cat', 'kind', 'month', 'q', 'tag']) if (params.has(k)) f[k] = params.get(k); }
   TXFIX[id] = {};
-  return `<h1>Transactions</h1><p class="sub">Every transaction in the period. Click a category label to re-categorise that merchant everywhere.</p><div style="height:12px"></div>${txTable(id, true)}`;
+  return `<h1>Transactions</h1><p class="sub">Every transaction in the period. Click a category to re-categorise that merchant everywhere; click ✎ to tag a transaction or mark it as shared.</p><div style="height:12px"></div>${txTable(id, true)}`;
+};
+
+
+// ------------------------------------------------------------------ budgets
+const LAST_MONTH = ALL_MONTHS[ALL_MONTHS.length - 1];
+function monthElapsed(m) {
+  // Share of the month the statements cover (1 for any finished month).
+  if (m !== LAST_MONTH || !PARTIAL.has(m)) return 1;
+  const dim = new Date(+m.slice(0, 4), +m.slice(5, 7), 0).getDate();
+  return Math.max(+DEND.slice(8, 10) / dim, 0.05);
+}
+function spentIn(cat, m) {
+  const i = D.idx.get(m);
+  if (i == null) return sum(TX.filter(t => t.m === m && isSpend(t) && (cat === 'All spending' || t.c === cat)).map(t => t.a));
+  if (cat === 'All spending') return D.total[i];
+  const c = D.catMap.get(cat);
+  return c ? c.values[i] : 0;
+}
+function budgetRow(cat, limit, m) {
+  const spent = spentIn(cat, m), el = monthElapsed(m);
+  const projected = el < 1 ? spent / el : spent;
+  const status = spent > limit ? 'over' : projected > limit * 1.02 ? 'risk' : 'ok';
+  return { cat, limit, spent, projected, status, elapsed: el, left: limit - spent };
+}
+const BSTATUS = { ok: ['✓', 'On track', 'good'], risk: ['!', 'At risk', 'warn'], over: ['✗', 'Over', 'bad'] };
+const bBadge = st => `<span class="badge st-${BSTATUS[st][2]}">${BSTATUS[st][0]} ${BSTATUS[st][1]}</span>`;
+function meter(b) {
+  const w = Math.min(b.spent / b.limit, 1) * 100, pace = b.elapsed < 1 ? `<i class="pace" style="left:${(b.elapsed * 100).toFixed(1)}%" title="Where you'd be if spending evenly"></i>` : '';
+  return `<span class="meter m-${BSTATUS[b.status][2]}"><i style="width:${w.toFixed(1)}%"></i>${pace}</span>`;
+}
+function niceRound(v) {
+  if (v <= 0) return 0;
+  const mag = 10 ** Math.floor(Math.log10(v)), step = mag / 10;
+  return Math.ceil(v / step) * step;
+}
+function budgetAlerts(m) {
+  return Object.entries(BUDGETS).map(([c, l]) => budgetRow(c, l, m)).filter(b => b.status !== 'ok');
+}
+
+VIEWS.budgets = (_, params) => {
+  const months = D.months.length ? D.months : ALL_MONTHS;
+  const m = params && params.get('m') && months.includes(params.get('m')) ? params.get('m') : months[months.length - 1];
+  const el = monthElapsed(m);
+  const cats = Object.keys(BUDGETS).sort((a, b) => (a === 'All spending' ? -1 : b === 'All spending' ? 1 : 0) || a.localeCompare(b));
+  const rows = cats.map(c => budgetRow(c, BUDGETS[c], m));
+  const histMonths = ALL_MONTHS.filter(x => x <= m && !PARTIAL.has(x)).slice(-6);
+  const hist = c => histMonths.map(x => { const v = spentIn(c, x), over = v > BUDGETS[c]; return `<i class="hd ${over ? 'over' : 'ok'}" title="${esc(mLabel(x))}: ${esc(money(v))}${over ? ' – over' : ''}"></i>`; }).join('');
+  const sel = `<select data-budgetmonth aria-label="Month">${months.slice().reverse().map(x => `<option value="${x}"${x === m ? ' selected' : ''}>${mLabel(x)}${x === LAST_MONTH && PARTIAL.has(x) ? ' (in progress)' : ''}</option>`).join('')}</select>`;
+  const body = rows.map(b => `<tr><td><span class="name">${b.cat === 'All spending' ? '<i class="swatch" style="background:var(--text)"></i><b>All spending</b>' : `${sw(b.cat)}<a href="${catHref(b.cat)}">${esc(b.cat)}</a>`}</span></td>
+    <td class="num">${money(b.spent)}</td><td style="min-width:120px">${meter(b)}</td>
+    <td class="num"><input class="budget-in" type="number" min="0" step="any" inputmode="decimal" value="${b.limit}" data-budget="${esc(b.cat)}" aria-label="Budget for ${esc(b.cat)}"></td>
+    <td class="num">${b.left >= 0 ? `${money(b.left)} left` : `<span class="up">${money(-b.left)} over</span>`}${el < 1 ? `<div class="small faint">heading for ${money(b.projected, true)}</div>` : ''}</td>
+    <td>${bBadge(b.status)}</td><td class="hide-sm"><span class="hist">${hist(b.cat)}</span></td>
+    <td><button class="linkbtn small" data-budgetrm="${esc(b.cat)}" aria-label="Remove budget">Remove</button></td></tr>`).join('');
+  // Suggestions for categories without a budget: typical (median) month, rounded up.
+  const base = D.baseIdx.slice(-6);
+  const suggest = [{ name: 'All spending', values: D.total }, ...D.cats.filter(c => (KINDS[c.name] || 'expense') === 'expense')]
+    .filter(c => !(c.name in BUDGETS))
+    .map(c => ({ name: c.name, v: niceRound(median(base.map(i => c.values[i]))) })).filter(x => x.v > 0).slice(0, 12);
+  const over = rows.filter(b => b.status === 'over').length, risk = rows.filter(b => b.status === 'risk').length;
+  const totalB = rows.filter(b => b.cat !== 'All spending').reduce((a, b) => a + b.limit, 0);
+  const tiles = rows.length ? [
+    tile('Budgets', String(rows.length), totalB ? `${money(totalB, true)} a month across categories` : ''),
+    tile('Over budget', `<span class="${over ? 'up' : ''}">${over}</span>`, over ? rows.filter(b => b.status === 'over').map(b => esc(b.cat)).join(', ') : 'none'),
+    tile('At risk', String(risk), el < 1 ? `if you keep spending at this pace (${pct(el)} of the month gone)` : 'only for a month in progress'),
+  ] : [];
+  return `<div class="head-row"><h1>Budgets</h1><span class="ctl">Month ${sel}</span></div>
+  <p class="sub">${el < 1 ? `${mLong(m)} is in progress: your statements run to ${dLabel(DEND)}. The marker on each bar shows where you'd be spending evenly.` : `How ${mLong(m)} went against your monthly budgets.`}</p>
+  ${rows.length ? `<div class="tiles">${tiles.join('')}</div>
+  <h2>${mLong(m)}</h2><div class="card scroll"><table><thead><tr><th>Budget</th><th class="num">Spent</th><th></th><th class="num">Monthly limit</th><th class="num">Left</th><th>Status</th><th class="hide-sm" title="Green = within budget, red = over">Last ${histMonths.length} months <span class="faint">(<span style="color:var(--good)">●</span> ok <span style="color:var(--critical)">●</span> over)</span></th><th></th></tr></thead><tbody>${body}</tbody></table></div>`
+    : `<div class="card empty" style="margin-top:16px">No budgets yet. Pick one below to start, or type your own.</div>`}
+  <h2>Add a budget</h2><p class="desc">Suggested from your typical month (the median of the last ${base.length} full months), rounded up. Click to add, then adjust the amount.</p>
+  <div class="chips">${suggest.map(x => `<button class="chip" data-budgetadd="${esc(x.name)}:${x.v}">${x.name === 'All spending' ? '' : sw(x.name)}${esc(x.name)} · ${money(x.v, true)}</button>`).join('') || '<span class="muted small">Every category already has a budget.</span>'}</div>
+  <p class="small faint" style="margin-top:14px">Budget changes made here are kept in this browser. Use “Save my changes” at the top to make them permanent${RAW.home ? '' : ' (or keep budgets in a config file and run with --config)'}.</p>`;
+};
+
+// ------------------------------------------------------------------ checks
+const checkKey = c => c.kind + ':' + c.title;
+const CHECK_ICON = { duplicate: '⧉', fees: '%', price: '▲', 'new-recurring': '✦', subscriptions: '↻', foreign: '¤' };
+VIEWS.checks = (_, params) => {
+  const all = RAW.checks || [];
+  const showAll = params && params.get('all') === '1';
+  const open = all.filter(c => !dismissed[checkKey(c)]);
+  const list = showAll ? all : open;
+  const card = c => {
+    const items = (c.items || []).map(i => TXID.get(i)).filter(Boolean);
+    const isDone = !!dismissed[checkKey(c)];
+    const rows = items.slice(0, 12).map(t => `<tr class="link" data-go="${esc(merHref(t.mer))}"><td class="num">${dLabel(t.d)}</td><td><span class="trunc">${esc(t.t)}</span></td><td class="num">${money(t.a)}</td></tr>`).join('');
+    return `<div class="card check ${c.severity}${isDone ? ' done' : ''}"><h3><span class="ic ${c.severity === 'warn' ? 'up' : ''}">${CHECK_ICON[c.kind] || '•'}</span> ${esc(c.title)}</h3>
+      <p class="small" style="margin:4px 0 8px">${esc(c.detail)}</p>
+      ${c.merchant ? `<a class="small" href="${merHref(c.merchant)}">See ${esc(title(c.merchant))} ›</a>` : ''}
+      ${rows ? `<table class="small"><tbody>${rows}</tbody></table>${items.length > 12 ? `<div class="small faint">and ${items.length - 12} more</div>` : ''}` : ''}
+      <div style="margin-top:8px"><button class="linkbtn small" data-dismiss="${esc(checkKey(c))}">${isDone ? '↺ Show again' : '✓ Mark as reviewed'}</button></div></div>`;
+  };
+  const warn = list.filter(c => c.severity === 'warn'), info = list.filter(c => c.severity !== 'warn');
+  const nDone = all.length - open.length;
+  return `<h1>Checks</h1><p class="sub">Things in your statements worth a second look: possible double charges, fees and interest, subscription changes, foreign-currency spending.</p>
+  ${!all.length ? '<div class="card empty" style="margin-top:16px">✓ Nothing to flag. No duplicate charges, fees or subscription changes found.</div>' : ''}
+  ${warn.length ? `<h2>Worth a look</h2><div class="cols">${warn.map(card).join('')}</div>` : ''}
+  ${info.length ? `<h2>Good to know</h2><div class="cols">${info.map(card).join('')}</div>` : ''}
+  ${all.length && !list.length ? '<div class="card empty" style="margin-top:16px">✓ All reviewed.</div>' : ''}
+  ${nDone ? `<p class="small" style="margin-top:14px">${showAll ? `<a href="#/checks">Hide reviewed</a>` : `<a href="#/checks?all=1">Show ${plural(nDone, 'reviewed item')}</a>`}</p>` : ''}
+  <p class="small faint">Checks cover all your statements, whatever period is selected.</p>`;
+};
+
+// ------------------------------------------------------------------ tags
+function tagStats(g) {
+  const tx = TX.filter(t => t.tags.includes(g));
+  const spend = tx.filter(isSpend);
+  const byCat = {};
+  for (const t of spend) byCat[t.c] = (byCat[t.c] || 0) + t.a;
+  return { tx, total: sum(spend.map(t => t.a)), first: tx.length ? tx[0].d : null, last: tx.length ? tx[tx.length - 1].d : null, byCat };
+}
+VIEWS.tags = () => {
+  const tags = allTags();
+  const help = `<div class="card small" style="margin-top:16px"><b>How to tag</b>: click ✎ next to any transaction (in Transactions, a month, a category…) and add a tag such as <i>Goa trip</i> or <i>Wedding</i>.
+    To tag lots at once, add a rule to your rules file, e.g. <code>[tags."Goa trip"]</code> with <code>from = 2026-05-01</code>, <code>to = 2026-05-20</code>.</div>`;
+  if (!tags.length) return `<h1>Tags</h1><p class="sub">Group spending across categories: a trip, a wedding, a home project.</p>${help}`;
+  const cards = tags.map(g => {
+    const st = tagStats(g);
+    const cats = Object.entries(st.byCat).sort((a, b) => b[1] - a[1]);
+    const bar = cats.map(([c, v]) => `<i style="width:${(v / (st.total || 1) * 100).toFixed(1)}%;background:${colorOf(c)}" title="${esc(c)}: ${esc(money(v))}"></i>`).join('');
+    return `<a class="card catcard" href="${tagHref(g)}"><div class="head-row"><b>#${esc(g)}</b><span class="small faint">${plural(st.tx.length, 'transaction')}</span></div>
+      <div class="amt">${money(st.total, true)}</div><div class="meta"><span>${st.first ? dLabel(st.first) + (st.last !== st.first ? ' – ' + dLabel(st.last) : '') : ''}</span></div>
+      <div class="stackbar">${bar}</div><div class="meta" style="margin-top:4px"><span>${cats.slice(0, 3).map(([c]) => esc(c)).join(', ')}</span></div></a>`;
+  }).join('');
+  return `<h1>Tags</h1><p class="sub">What each trip, event or project really cost, across categories. Tags ignore the period filter.</p>
+  <div class="catgrid" style="margin-top:16px">${cards}</div>${help}`;
+};
+VIEWS.tag = g => {
+  const st = tagStats(g);
+  const head = crumbs([['Tags', '#/tags'], ['#' + g]]);
+  if (!st.tx.length) return head + `<h1>#${esc(g)}</h1><div class="card empty">No transactions have this tag any more.</div>`;
+  const cats = Object.entries(st.byCat).sort((a, b) => b[1] - a[1]);
+  const max = cats.length ? cats[0][1] : 1;
+  const shared = st.tx.filter(t => t.share !== 1);
+  const days = (new Date(st.last) - new Date(st.first)) / 864e5 + 1;
+  const id = 'tag:' + g; TXFIX[id] = { tag: g };
+  return `${head}<h1>#${esc(g)}</h1><p class="sub">${dLabel(st.first)}${st.last !== st.first ? ' – ' + dLabel(st.last) : ''}</p>
+  <div class="tiles">${tile('Total cost', money(st.total, true), shared.length ? `your share; ${plural(shared.length, 'shared item')}` : '')}
+    ${tile('Transactions', String(st.tx.length), days > 1 ? `over ${Math.round(days)} days` : '')}
+    ${tile('Per day', days > 1 ? money(st.total / days, true) : '–', '')}
+    ${tile('vs your average month', D.avgMonth ? pct(st.total / D.avgMonth) : '–', 'of a typical month’s spending')}</div>
+  <h2>By category</h2><div class="card"><table><tbody>${cats.map(([c, v]) => `<tr class="link" data-go="${esc(catHref(c))}"><td><span class="name">${sw(c)}${esc(c)}</span></td><td>${shareBar(v, max, colorOf(c))}</td><td class="num">${money(v)}</td><td class="num faint">${pct(v / (st.total || 1))}</td></tr>`).join('')}</tbody></table></div>
+  <h2>Transactions</h2>${txTable(id)}`;
 };
 
 // ------------------------------------------------------------------ transactions table
 function txTable(id, full) {
-  const f = S.tx[id] = S.tx[id] || { q: '', cat: '', kind: '', month: '', sort: 'd', dir: -1, limit: 100 };
+  const f = S.tx[id] = S.tx[id] || { q: '', cat: '', kind: '', month: '', tag: '', sort: 'd', dir: -1, limit: 100 };
   const fx = TXFIX[id] || {};
+  const tags = allTags();
   const catOpts = [...new Set(D.tx.map(t => t.c))].sort().map(c => `<option${f.cat === c ? ' selected' : ''}>${esc(c)}</option>`).join('');
   const kinds = [['', 'All types'], ['expense', 'Purchases'], ['refund', 'Refunds'], ['income', 'Income'], ['investment', 'Investments'], ['transfer', 'Transfers (not counted)']];
   const controls = `<div class="filters"><input type="search" placeholder="Search description…" value="${esc(f.q)}" data-txf="${esc(id)}:q" aria-label="Search">
     ${fx.cat ? '' : `<select data-txf="${esc(id)}:cat" aria-label="Category"><option value="">All categories</option>${catOpts}</select>`}
     ${fx.mer ? '' : `<select data-txf="${esc(id)}:kind" aria-label="Type">${kinds.map(([k, t]) => `<option value="${k}"${f.kind === k ? ' selected' : ''}>${t}</option>`).join('')}</select>`}
-    ${fx.month || !full ? '' : `<select data-txf="${esc(id)}:month" aria-label="Month"><option value="">All months</option>${D.months.map(m => `<option value="${m}"${f.month === m ? ' selected' : ''}>${mLabel(m)}</option>`).join('')}</select>`}</div>`;
+    ${fx.month || !full ? '' : `<select data-txf="${esc(id)}:month" aria-label="Month"><option value="">All months</option>${D.months.map(m => `<option value="${m}"${f.month === m ? ' selected' : ''}>${mLabel(m)}</option>`).join('')}</select>`}
+    ${fx.tag || !tags.length ? '' : `<select data-txf="${esc(id)}:tag" aria-label="Tag"><option value="">All tags</option><option value="*"${f.tag === '*' ? ' selected' : ''}>Any tag</option><option value="~"${f.tag === '~' ? ' selected' : ''}>Shared (split)</option>${tags.map(g => `<option${f.tag === g ? ' selected' : ''}>${esc(g)}</option>`).join('')}</select>`}</div>`;
   return `<div data-txt="${esc(id)}">${controls}<div class="txbody">${txBody(id)}</div></div>`;
 }
 function txBody(id) {
   const f = S.tx[id], fx = TXFIX[id] || {}, q = f.q.trim().toLowerCase();
-  let rows = D.tx.filter(t => (!fx.cat || t.c === fx.cat) && (!fx.mer || t.mer === fx.mer) && (!fx.month || t.m === fx.month)
+  const tagOk = (tag, t) => !tag || (tag === '*' ? t.tags.length > 0 : tag === '~' ? t.share !== 1 : t.tags.includes(tag));
+  const pool = fx.ids ? fx.ids.map(i => TXID.get(i)).filter(Boolean) : fx.tag ? TX : D.tx;
+  let rows = pool.filter(t => (!fx.cat || t.c === fx.cat) && (!fx.mer || t.mer === fx.mer) && (!fx.month || t.m === fx.month)
+    && tagOk(fx.tag, t) && tagOk(f.tag, t)
     && (!f.cat || t.c === f.cat) && (!f.kind || t.k === f.kind) && (!f.month || t.m === f.month)
     && (!q || t.t.toLowerCase().includes(q) || t.mer.includes(q) || t.s.toLowerCase().includes(q)));
   const key = { d: t => t.d + String(t.i).padStart(7, '0'), t: t => t.t.toLowerCase(), c: t => t.c, k: t => t.k, s: t => t.s, a: t => t.a }[f.sort] || (t => t.d);
@@ -851,13 +1033,14 @@ function txBody(id) {
   const spent = sum(rows.filter(isSpend).map(t => t.a)), got = -sum(rows.filter(t => t.k === 'income').map(t => t.a));
   const th = (k, label, cls) => `<th class="${cls || ''}" data-txsort="${esc(id)}:${k}">${label}${f.sort === k ? ` <span class="arrow">${f.dir > 0 ? '↑' : '↓'}</span>` : ''}</th>`;
   const body = rows.slice(0, f.limit).map(t => `<tr><td class="num">${dLabel(t.d)}</td>
-    <td><a href="${merHref(t.mer)}" class="trunc" title="${esc(t.t)}">${esc(t.t)}</a></td>
+    <td><a href="${merHref(t.mer)}" class="trunc" title="${esc(t.t)}">${esc(t.t)}</a>${t.tags.length ? `<div class="tags">${t.tags.map(g => `<a class="tag" href="${tagHref(g)}">#${esc(g)}</a>`).join('')}</div>` : ''}</td>
     <td><button class="catbtn" data-recat="${esc(t.mer)}" title="Change category for all ${esc(title(t.mer))} transactions">${sw(t.c)}${esc(t.c)}<span class="caret">▾</span></button></td>
     <td class="kind hide-sm">${{ expense: 'purchase', refund: 'refund', income: 'income', investment: 'investment', transfer: 'transfer' }[t.k]}</td>
-    <td class="small faint hide-sm">${esc(t.s)}</td><td class="num">${t.a < 0 ? `<span class="down">${money(t.a)}</span>` : money(t.a)}</td></tr>`).join('');
+    <td class="small faint hide-sm">${esc(t.s)}</td><td class="num">${t.a < 0 ? `<span class="down">${money(t.a)}</span>` : money(t.a)}${t.share !== 1 ? `<div class="small faint">${pct(t.share)} of ${money(t.orig)}</div>` : ''}</td>
+    <td class="edit-cell"><button class="iconbtn sm" data-edit="${esc(t.id)}" title="Tag or split this transaction" aria-label="Tag or split this transaction">✎</button></td></tr>`).join('');
   return `<div class="small muted" style="margin-bottom:6px">${plural(rows.length, 'transaction')} · spent ${money(spent)}${got ? ` · received ${money(got)}` : ''}</div>
-  <div class="card scroll"><table><thead><tr>${th('d', 'Date', 'num')}${th('t', 'Description')}${th('c', 'Category')}${th('k', 'Type', 'hide-sm')}${th('s', 'Statement', 'hide-sm')}${th('a', 'Amount', 'num')}</tr></thead>
-  <tbody>${body || '<tr><td colspan="6" class="muted">No transactions match.</td></tr>'}</tbody></table>
+  <div class="card scroll"><table><thead><tr>${th('d', 'Date', 'num')}${th('t', 'Description')}${th('c', 'Category')}${th('k', 'Type', 'hide-sm')}${th('s', 'Statement', 'hide-sm')}${th('a', 'Amount', 'num')}<th class="edit-cell"></th></tr></thead>
+  <tbody>${body || '<tr><td colspan="7" class="muted">No transactions match.</td></tr>'}</tbody></table>
   ${rows.length > f.limit ? `<div style="margin-top:8px"><button class="btn" data-txmore="${esc(id)}">Show more (${rows.length - f.limit} left)</button></div>` : ''}</div>`;
 }
 
@@ -910,30 +1093,109 @@ function toast(msg, undo) {
   if (undo) $('button', el).addEventListener('click', () => { el.remove(); undo(); });
   clearTimeout(toastTimer); toastTimer = setTimeout(() => el.remove(), 7000);
 }
+function openEdit(btn) {
+  closePop();
+  const t = TXID.get(btn.dataset.edit);
+  if (!t) return;
+  let tags = [...t.tags];
+  const shares = [[1, 'All mine'], [0.5, 'Half'], [1 / 3, 'A third'], [0.25, 'A quarter'], [0, 'None (fully repaid)']];
+  popEl = document.createElement('div');
+  popEl.className = 'pop';
+  const known = allTags();
+  const draw = () => {
+    popEl.innerHTML = `<div class="small faint">${dLabel(t.d)} · ${money(t.orig)}</div><div style="font-weight:600;margin:2px 0 8px">${esc(t.t)}</div>
+    <div>Tags <span class="faint small">(a trip, an event, a project)</span></div>
+    <div class="tags" style="margin:4px 0">${tags.map((g, k) => `<span class="tag">#${esc(g)} <button class="linkbtn" data-untag="${k}" aria-label="Remove tag">×</button></span>`).join('') || '<span class="small faint">none</span>'}</div>
+    <div class="row" style="margin-top:4px"><input type="text" list="ss-taglist" placeholder="Add a tag…" aria-label="Add a tag"><button class="btn" data-addtag>Add</button></div>
+    <datalist id="ss-taglist">${known.map(g => `<option value="${esc(g)}">`).join('')}</datalist>
+    <div style="margin-top:10px">Your share <span class="faint small">(for shared costs someone pays you back for)</span></div>
+    <select data-share aria-label="Your share">${shares.map(([v, l]) => `<option value="${v}"${Math.abs(v - t.share) < 0.001 ? ' selected' : ''}>${l} · ${pct(v)}</option>`).join('')}
+      ${shares.some(([v]) => Math.abs(v - t.share) < 0.001) ? '' : `<option value="${t.share}" selected>${pct(t.share)}</option>`}<option value="custom">Other %…</option></select>
+    <div class="row"><span class="spacer"></span><button class="btn" data-cancel>Cancel</button><button class="btn primary" data-save>Save</button></div>`;
+  };
+  draw();
+  document.body.appendChild(popEl);
+  const r = btn.getBoundingClientRect();
+  popEl.style.left = Math.max(8, Math.min(r.right - 280, innerWidth - 296)) + 'px';
+  popEl.style.top = (r.bottom + 6 + popEl.offsetHeight > innerHeight ? Math.max(8, r.top - popEl.offsetHeight - 6) : r.bottom + 6) + 'px';
+  const addTag = () => { const inp = $('input', popEl), v = inp.value.trim().replace(/^#/, ''); if (v && !tags.includes(v)) tags.push(v); const share = $('[data-share]', popEl).value; draw(); $('[data-share]', popEl).value = share; $('input', popEl).focus(); };
+  popEl.addEventListener('click', e => {
+    const el = e.target;
+    if (el.matches('[data-addtag]')) addTag();
+    else if (el.matches('[data-untag]')) { tags.splice(+el.dataset.untag, 1); const share = $('[data-share]', popEl).value; draw(); $('[data-share]', popEl).value = share; }
+    else if (el.matches('[data-cancel]')) closePop();
+    else if (el.matches('[data-save]')) {
+      const pending = $('input', popEl).value.trim().replace(/^#/, '');
+      if (pending && !tags.includes(pending)) tags.push(pending);
+      let share = $('[data-share]', popEl).value;
+      if (share === 'custom') { const p = prompt('Your share, in percent (0-100):', String(Math.round(t.share * 100))); if (p == null) return; share = Math.min(100, Math.max(0, +p || 0)) / 100; }
+      closePop();
+      setTxEdit(t, tags, +share);
+    }
+  });
+  popEl.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.matches('input')) { e.preventDefault(); addTag(); } if (e.key === 'Escape') closePop(); });
+  $('input', popEl).focus();
+}
+function setTxEdit(t, tags, share) {
+  const before = txedits[t.id];
+  const same = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
+  if (same(tags, t.tags0) && Math.abs(share - t.share0) < 1e-9) delete txedits[t.id];
+  else txedits[t.id] = { tags, share };
+  store.set('txedits', txedits);
+  refresh();
+  const what = [tags.length ? 'tags: ' + tags.join(', ') : 'no tags', share !== 1 ? `your share ${pct(share)}` : ''].filter(Boolean).join(' · ');
+  toast(`Saved: ${what}.`, () => { if (before) txedits[t.id] = before; else delete txedits[t.id]; store.set('txedits', txedits); refresh(); });
+}
+function setBudget(cat, amount) {
+  const base = (RAW.budgets || {})[cat];
+  if (amount == null || !(amount > 0)) { if (base != null) budgetEdits[cat] = null; else delete budgetEdits[cat]; }
+  else if (base === amount) delete budgetEdits[cat];
+  else budgetEdits[cat] = amount;
+  store.set('budgets', budgetEdits);
+  refresh();
+}
 function rulesToml() {
   const by = {};
   for (const [mer, cat] of Object.entries(overrides)) (by[cat] = by[cat] || []).push(mer);
-  let out = '# Category fixes made in the SpendStories report.\n# Use with: spendstories <statements> --rules my_rules.toml\n';
+  let out = '';
   for (const cat of Object.keys(by).sort()) {
     out += `\n[categories.${JSON.stringify(cat)}]\n`;
     if ((KINDS[cat] || 'expense') !== 'expense' && RAW.kinds[cat]) out += `kind = "${KINDS[cat]}"\n`;
     out += `merchants = [${by[cat].sort().map(m => JSON.stringify(m)).join(', ')}]\n`;
   }
+  const tagged = {}, shares = {};
+  for (const [id, e] of Object.entries(txedits)) {
+    const t = TXID.get(id); if (!t) continue;
+    for (const g of e.tags || []) if (!t.tags0.includes(g)) (tagged[g] = tagged[g] || []).push(id);
+    if (e.share != null && Math.abs(e.share - t.share0) > 1e-9) (shares[e.share] = shares[e.share] || []).push(id);
+  }
+  for (const g of Object.keys(tagged).sort()) out += `\n[tags.${JSON.stringify(g)}]\ntransactions = [${tagged[g].map(i => JSON.stringify(i)).join(', ')}]\n`;
+  for (const sh of Object.keys(shares)) out += `\n[[splits]]\nshare = ${+(+sh).toFixed(4)}\ntransactions = [${shares[sh].map(i => JSON.stringify(i)).join(', ')}]\n`;
   return out;
 }
+function budgetsToml() {
+  const keys = Object.keys(BUDGETS);
+  if (!keys.length) return '[budgets]\n';
+  return '[budgets]\n' + keys.map(k => `${JSON.stringify(k)} = ${BUDGETS[k]}`).join('\n') + '\n';
+}
 function exportModal() {
-  const toml = rulesToml();
+  const rules = rulesToml().trim(), budgets = Object.keys(budgetEdits).length ? budgetsToml() : '';
+  const home = RAW.home;
+  const block = (title, file, text, how) => `<h4 style="margin:14px 0 4px">${title}</h4><p class="small muted" style="margin:0 0 6px">${how}</p>
+    <textarea readonly rows="8">${esc(text)}</textarea>
+    <div class="pager" style="margin-top:6px"><a class="btn primary" download="${file}" href="data:text/plain;charset=utf-8,${encodeURIComponent(text + '\n')}">Download ${file}</a><button class="btn" data-copy>Copy</button></div>`;
   const bg = document.createElement('div');
   bg.className = 'modal-bg';
-  bg.innerHTML = `<div class="modal" role="dialog" aria-label="Export rules"><h3>Keep your category fixes</h3>
-  <p class="small muted">Your fixes are saved in this browser only. Save them as a rules file so every future report uses them:</p>
-  <textarea readonly>${esc(toml)}</textarea>
-  <p class="small">Then run <code>spendstories statements/ --rules my_rules.toml</code></p>
-  <div class="pager"><a class="btn primary" download="my_rules.toml" href="data:text/plain;charset=utf-8,${encodeURIComponent(toml)}">Download my_rules.toml</a><button class="btn" data-copy>Copy</button><span class="spacer"></span><button class="btn" data-close>Close</button></div></div>`;
+  bg.innerHTML = `<div class="modal" role="dialog" aria-label="Save my changes"><h3>Keep your changes</h3>
+  <p class="small muted">Your edits are only saved in this browser. To use them in every future report, add these lines to your settings files.</p>
+  ${rules ? block('Categories, tags and shares', 'rules.toml', rules, home ? `Paste at the end of <code>${esc(home)}/rules.toml</code> (open it with TextEdit).` : 'Save as <code>my_rules.toml</code> and run with <code>--rules my_rules.toml</code>.') : ''}
+  ${budgets ? block('Budgets', 'config.toml', budgets.trim(), home ? `Replace the <code>[budgets]</code> section of <code>${esc(home)}/config.toml</code> with this.` : 'Save as <code>config.toml</code> and run with <code>--config config.toml</code>.') : ''}
+  <p class="small">${home ? 'Then run <code>spendstories report</code> (or double-click “Update Report”). Once the files have them, you can click “Clear browser edits”.' : ''}</p>
+  <div class="pager"><span class="spacer"></span><button class="btn" data-close>Close</button></div></div>`;
   document.body.appendChild(bg);
   bg.addEventListener('click', e => {
     if (e.target === bg || e.target.matches('[data-close]')) bg.remove();
-    if (e.target.matches('[data-copy]')) { const ta = $('textarea', bg); ta.select(); try { document.execCommand('copy'); e.target.textContent = 'Copied'; } catch (err) { /* select is enough */ } }
+    if (e.target.matches('[data-copy]')) { const ta = e.target.parentElement.previousElementSibling; ta.select(); try { document.execCommand('copy'); e.target.textContent = 'Copied'; } catch (err) { /* select is enough */ } }
   });
 }
 
@@ -947,8 +1209,9 @@ function shell() {
     <span class="ctl" id="ss-custom" hidden><select id="ss-from" aria-label="From">${ALL_MONTHS.map(m => `<option value="${m}">${mLabel(m)}</option>`).join('')}</select>–<select id="ss-to" aria-label="To">${ALL_MONTHS.map(m => `<option value="${m}">${mLabel(m)}</option>`).join('')}</select></span>
     <button class="iconbtn" id="ss-theme" title="Light / dark" aria-label="Toggle light or dark theme">☾</button>
   </div><nav class="tabs" aria-label="Sections">
-    <a href="#/overview" data-tab="overview">Overview</a><a href="#/trends" data-tab="trends">Trends</a><a href="#/categories" data-tab="categories">Categories</a>
-    <a href="#/merchants" data-tab="merchants">Merchants</a><a href="#/transactions" data-tab="transactions">Transactions</a></nav></header>
+    <a href="#/overview" data-tab="overview">Overview</a><a href="#/trends" data-tab="trends">Trends</a><a href="#/budgets" data-tab="budgets">Budgets</a>
+    <a href="#/categories" data-tab="categories">Categories</a><a href="#/tags" data-tab="tags">Tags</a><a href="#/merchants" data-tab="merchants">Merchants</a>
+    <a href="#/transactions" data-tab="transactions">Transactions</a><a href="#/checks" data-tab="checks">Checks<span class="count" id="ss-checks-n"></span></a></nav></header>
   <div class="changes" id="ss-changes"></div>
   <main id="ss-view"></main>
   <footer>Spending = purchases minus refunds. Card bill payments and transfers between your own accounts aren't counted, so nothing is counted twice. Investments are shown separately.
@@ -965,7 +1228,7 @@ function parseRoute() {
   const arg = parts.slice(1).join('/');
   return { view: VIEWS[view] ? view : 'overview', arg, params: query ? new URLSearchParams(query) : null, key: location.hash };
 }
-const TAB = { overview: 'overview', month: 'overview', trends: 'trends', categories: 'categories', category: 'categories', merchants: 'merchants', merchant: 'merchants', transactions: 'transactions' };
+const TAB = { overview: 'overview', month: 'overview', trends: 'trends', budgets: 'budgets', categories: 'categories', category: 'categories', tags: 'tags', tag: 'tags', merchants: 'merchants', merchant: 'merchants', transactions: 'transactions', checks: 'checks' };
 let lastKey = null;
 function render(scroll = true) {
   closePop();
@@ -976,10 +1239,15 @@ function render(scroll = true) {
   $('#ss-range').value = S.range;
   $('#ss-custom').hidden = S.range !== 'custom';
   $('#ss-from').value = S.from; $('#ss-to').value = S.to;
-  const nOv = Object.keys(overrides).length;
-  $('#ss-changes').innerHTML = nOv ? `<div><span>✎ You've re-categorised ${plural(nOv, 'merchant')}. Saved in this browser only.</span><button class="linkbtn" data-export>Save as a rules file</button><button class="linkbtn" data-resetall>Undo all</button></div>` : '';
+  const nc = nChanges(), parts = [];
+  if (Object.keys(overrides).length) parts.push(plural(Object.keys(overrides).length, 'category fix'));
+  if (Object.keys(txedits).length) parts.push(plural(Object.keys(txedits).length, 'tagged/split transaction'));
+  if (Object.keys(budgetEdits).length) parts.push(plural(Object.keys(budgetEdits).length, 'budget change'));
+  $('#ss-changes').innerHTML = nc ? `<div><span>✎ ${parts.join(', ')}, saved in this browser only.</span><button class="linkbtn" data-export>Save my changes</button><button class="linkbtn" data-resetall>Clear browser edits</button></div>` : '';
   $('#ss-view').innerHTML = VIEWS[r.view](r.arg, r.params);
-  document.title = 'Spend Stories · ' + ({ overview: 'Overview', trends: 'Trends', categories: 'Categories', merchants: 'Merchants', transactions: 'Transactions', category: r.arg, merchant: title(r.arg), month: r.arg && mLong(r.arg) }[r.view] || '');
+  document.title = 'Spend Stories · ' + ({ overview: 'Overview', trends: 'Trends', budgets: 'Budgets', categories: 'Categories', tags: 'Tags', checks: 'Checks', merchants: 'Merchants', transactions: 'Transactions', category: r.arg, merchant: title(r.arg), tag: '#' + r.arg, month: r.arg && mLong(r.arg) }[r.view] || '');
+  const nOpen = (RAW.checks || []).filter(c => c.severity === 'warn' && !dismissed[checkKey(c)]).length;
+  $('#ss-checks-n').textContent = nOpen ? String(nOpen) : '';
   drawCharts();
   if (scroll && r.key !== lastKey) window.scrollTo(0, 0);
   lastKey = r.key;
@@ -987,8 +1255,8 @@ function render(scroll = true) {
 
 function setState(k, v) {
   if (['window', 'merLimit'].includes(k)) v = +v;
+  if (k === 'oneoffs') v = v === true || v === 'true';
   S[k] = v;
-  if (k === 'oneoffs') v = v === 'true';
   if (['range', 'window', 'heat', 'from', 'to', 'oneoffs'].includes(k)) store.set(k, v);
   if (['range', 'window', 'from', 'to', 'oneoffs'].includes(k)) derive();
   render(false);
@@ -997,9 +1265,14 @@ function setState(k, v) {
 function bind() {
   document.addEventListener('click', e => {
     const t = e.target;
-    if (popEl && !popEl.contains(t) && !t.closest('[data-recat]')) closePop();
+    if (popEl && !popEl.contains(t) && !t.closest('[data-recat], [data-edit]')) closePop();
     let el;
     if ((el = t.closest('[data-recat]'))) { e.preventDefault(); e.stopPropagation(); openRecat(el); return; }
+    if ((el = t.closest('[data-edit]'))) { e.preventDefault(); e.stopPropagation(); openEdit(el); return; }
+    if ((el = t.closest('[data-budgetadd]'))) { const s2 = el.dataset.budgetadd, i = s2.lastIndexOf(':'); setBudget(s2.slice(0, i), +s2.slice(i + 1)); return; }
+    if ((el = t.closest('[data-budgetrm]'))) { setBudget(el.dataset.budgetrm, null); return; }
+    if ((el = t.closest('[data-dismiss]'))) { const k = el.dataset.dismiss; if (dismissed[k]) delete dismissed[k]; else dismissed[k] = true; store.set('dismissed', dismissed); render(false); return; }
+    if (t.closest('[data-print]')) { window.print(); return; }
     if ((el = t.closest('[data-set]'))) { const [k, v] = el.dataset.set.split(':'); setState(k, v); return; }
     if ((el = t.closest('[data-overlay]'))) { const k = el.dataset.overlay; S.overlays[k] = !S.overlays[k]; store.set('overlays', S.overlays); render(false); return; }
     if ((el = t.closest('[data-sort]'))) {
@@ -1016,8 +1289,11 @@ function bind() {
     if ((el = t.closest('[data-txmore]'))) { const id = el.dataset.txmore; S.tx[id].limit += 300; $(`[data-txt="${CSS.escape(id)}"] .txbody`).innerHTML = txBody(id); return; }
     if (t.closest('[data-export]')) { exportModal(); return; }
     if (t.closest('[data-resetall]')) {
-      const saved = overrides; overrides = {}; store.set('overrides', overrides); refresh();
-      toast('Undid all category changes.', () => { overrides = saved; store.set('overrides', overrides); refresh(); }); return;
+      const saved = [overrides, txedits, budgetEdits];
+      overrides = {}; txedits = {}; budgetEdits = {};
+      const persist = () => { store.set('overrides', overrides); store.set('txedits', txedits); store.set('budgets', budgetEdits); refresh(); };
+      persist();
+      toast('Cleared your browser edits.', () => { [overrides, txedits, budgetEdits] = saved; persist(); }); return;
     }
     if (t.closest('a, button, input, select, textarea')) return;
     if ((el = t.closest('[data-go]'))) location.hash = el.dataset.go;
@@ -1039,6 +1315,8 @@ function bind() {
     else if (t.id === 'ss-from') { S.range = 'custom'; setState('from', t.value); }
     else if (t.id === 'ss-to') { S.range = 'custom'; setState('to', t.value); }
     else if (t.dataset.setsel) setState(t.dataset.setsel, t.value);
+    else if (t.dataset.budget != null) setBudget(t.dataset.budget, t.value === '' ? null : +t.value);
+    else if (t.hasAttribute('data-budgetmonth')) location.hash = '#/budgets?m=' + t.value;
   });
   $('#ss-theme').addEventListener('click', () => {
     const root = document.documentElement;

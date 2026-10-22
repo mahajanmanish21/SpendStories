@@ -381,3 +381,232 @@ def test_report_app_interactions(tmp_path):
     rules.write_text(toml)
     categorize(txns, load_rules([rules]))
     assert {t.category for t in txns if t.merchant == "spotify"} == {"Music"}
+
+
+# ---------------------------------------------------------------- library, budgets, tags, splits, checks
+
+def _restore_network(saved):
+    from spendstories import offline
+    (socket.socket, socket.create_connection, socket.getaddrinfo,
+     socket.gethostbyname, socket.gethostbyname_ex) = saved
+    offline._installed = False
+
+
+@pytest.fixture
+def no_net_leak():
+    saved = (socket.socket, socket.create_connection, socket.getaddrinfo,
+             socket.gethostbyname, socket.gethostbyname_ex)
+    yield
+    _restore_network(saved)
+
+
+def test_library_import_inbox_and_overlaps(tmp_path, no_net_leak, capsys):
+    from spendstories.cli import main
+    from spendstories.library import Library, library_status, read_transactions
+
+    home = tmp_path / "lib"
+    assert main(["--home", str(home), "init"]) == 0
+    lib = Library(home)
+    assert lib.inbox.is_dir() and lib.rules_path.exists() and lib.config_path.exists()
+
+    jan = "Date,Description,Amount\n05/01/2026,COFFEE,4.00\n05/01/2026,COFFEE,4.00\n20/01/2026,BIGBASKET,50.00\n"
+    # An overlapping export: repeats 20 Jan, adds February.
+    jan_feb = "Date,Description,Amount\n20/01/2026,BIGBASKET,50.00\n03/02/2026,BIGBASKET,60.00\n"
+    (lib.inbox / "jan.csv").write_text(jan)
+    (lib.inbox / "janfeb.csv").write_text(jan_feb)
+    assert main(["--home", str(home), "inbox", "-q"]) == 0
+    txns = read_transactions(lib)
+    assert sorted((t.description, t.amount) for t in txns) == [
+        ("BIGBASKET", 50.0), ("BIGBASKET", 60.0), ("COFFEE", 4.0), ("COFFEE", 4.0)]   # two real coffees kept
+    assert not list(lib.inbox.iterdir())                                               # Inbox emptied
+    assert (lib.imported / "2026-01" / "jan.csv").exists() and (lib.imported / "2026-02" / "janfeb.csv").exists()
+    assert lib.report_path.exists()
+
+    # Same file again: skipped as a whole.
+    (lib.inbox / "jan-again.csv").write_text(jan)
+    capsys.readouterr()
+    assert main(["--home", str(home), "inbox"]) == 0
+    assert "already imported" in capsys.readouterr().err
+    assert len(read_transactions(lib)) == 4
+    assert library_status(lib)["files"][0]["added"] == 3
+
+    # Unreadable files stay in the Inbox.
+    (lib.inbox / "junk.csv").write_text("hello\nworld\n")
+    main(["--home", str(home), "inbox", "-q"])
+    assert (lib.inbox / "junk.csv").exists()
+
+
+def test_budget_command_edits_config(tmp_path, no_net_leak):
+    from spendstories.cli import main
+    from spendstories.library import Library, load_config
+
+    home = tmp_path / "lib"
+    main(["--home", str(home), "budget", "set", "Dining & Food Delivery", "8000"])
+    main(["--home", str(home), "budget", "set", "All spending", "90000"])
+    main(["--home", str(home), "budget", "set", "Dining & Food Delivery", "7500"])
+    cfg = load_config(Library(home).config_path)
+    assert cfg.budgets == {"Dining & Food Delivery": 7500, "All spending": 90000}
+    main(["--home", str(home), "budget", "remove", "All spending"])
+    assert load_config(Library(home).config_path).budgets == {"Dining & Food Delivery": 7500}
+    assert "# Monthly budgets" in Library(home).config_path.read_text()  # comments kept
+
+
+def test_budget_status_projection():
+    from spendstories.pipeline import build
+
+    txns = [_t(date(2026, m, 5), "SWIGGY", 100.0) for m in (1, 2, 3)] + [_t(date(2026, 4, 1), "SWIGGY", 60.0),
+                                                                          _t(date(2026, 4, 10), "BIGBASKET", 10.0)]
+    built = build(txns, [], True, {"Dining & Food Delivery": 150, "Groceries": 5})
+    st = {b["category"]: b for b in built.budget_status}
+    assert st["Groceries"]["status"] == "over"
+    d = st["Dining & Food Delivery"]
+    assert d["in_progress"] and d["projected"] == pytest.approx(180) and d["status"] == "at-risk"
+
+
+def test_tags_and_splits(tmp_path):
+    from spendstories.extras import apply_extras, load_extras
+    from spendstories.library import assign_ids
+
+    rules = tmp_path / "rules.toml"
+    rules.write_text('''
+[tags."Goa trip"]
+from = 2026-05-01
+to = 2026-05-10
+categories = ["Travel", "Dining & Food Delivery"]
+
+[tags.Gifts]
+keywords = ["ferns"]
+
+[[splits]]
+share = 0.5
+keywords = ["landlord"]
+''')
+    txns = [_t(date(2026, 5, 2), "INDIGO AIRLINES", 5000), _t(date(2026, 5, 3), "SWIGGY", 400),
+            _t(date(2026, 5, 3), "BIGBASKET", 300), _t(date(2026, 6, 1), "INDIGO AIRLINES", 5000),
+            _t(date(2026, 5, 4), "FERNS N PETALS", 900), _t(date(2026, 5, 1), "LANDLORD RENT", 20000)]
+    assign_ids(txns)
+    categorize(txns, load_rules([rules]))
+    # A split naming one transaction beats the keyword rule.
+    rules.write_text(rules.read_text() + f'\n[[splits]]\nshare = 1\ntransactions = ["{txns[5].id}"]\n')
+    apply_extras(txns, load_extras([rules]))
+    assert [t.tags for t in txns] == [["Goa trip"], ["Goa trip"], [], [], ["Gifts"], []]
+    assert txns[5].amount == 20000 and txns[5].share == 1
+    rules.write_text(rules.read_text().rsplit("[[splits]]", 1)[0])
+    apply_extras(txns, load_extras([rules]))
+    assert txns[5].amount == 10000 and txns[5].original_amount == 20000 and txns[5].share == 0.5
+
+
+def test_bad_extras_are_explained(tmp_path):
+    from spendstories.extras import load_extras
+
+    f = tmp_path / "r.toml"
+    f.write_text("[[splits]]\nshare = 2\nkeywords = ['x']\n")
+    with pytest.raises(ValueError, match="between 0 and 1"):
+        load_extras([f])
+    f.write_text("[tags.Empty]\n")
+    with pytest.raises(ValueError, match="needs dates"):
+        load_extras([f])
+
+
+def test_checks_find_leaks(tmp_path):
+    from make_sample_data import generate
+    from spendstories.library import assign_ids
+    from spendstories.pipeline import build
+
+    generate(tmp_path)
+    txns = []
+    for f in sorted(tmp_path.iterdir()):
+        txns += load_file(f).transactions
+    txns, _ = dedupe(txns)
+    assign_ids(txns)
+    built = build(txns, [], True)
+    kinds = {c["kind"]: c for c in built.checks}
+    assert "DECATHLON" in kinds["duplicate"]["title"]
+    assert kinds["fees"]["amount"] == pytest.approx(750 + 135 + 1240 + 35.5)
+    assert "Interest" in kinds["fees"]["detail"]
+    assert kinds["price"]["title"].startswith("Netflix")
+    assert "Youtube" in kinds["new-recurring"]["title"]
+    assert kinds["foreign"]["amount"] == pytest.approx(1015)   # not the "USD 12.00" in the description
+    assert all(built.transactions[0].id for _ in [0])
+
+
+def test_setup_mac_writes_launcher_and_agent(tmp_path, monkeypatch, no_net_leak):
+    from spendstories.cli import main
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    home = tmp_path / "SpendStories"
+    assert main(["--home", str(home), "setup-mac", "--auto"]) == 0
+    cmd = home / "Update Report.command"
+    assert cmd.exists() and cmd.stat().st_mode & 0o111
+    assert "inbox --open" in cmd.read_text()
+    plist = (tmp_path / "Library" / "LaunchAgents" / "com.spendstories.inbox.plist").read_text()
+    assert "<key>WatchPaths</key>" in plist and str(home / "Inbox") in plist
+
+
+def test_oneoff_cli_still_works_with_budgets(tmp_path, no_net_leak):
+    from spendstories.cli import main
+
+    f = tmp_path / "s.csv"
+    f.write_text("Date,Description,Amount\n01/01/2026,UBER,10\n02/01/2026,SWIGGY,30\n")
+    cfg = tmp_path / "c.toml"
+    cfg.write_text('currency = "$"\n[budgets]\n"Transport" = 5\n')
+    out = tmp_path / "r.html"
+    assert main([str(f), "-o", str(out), "--config", str(cfg), "-q"]) == 0
+    page = out.read_text()
+    assert '"budgets":{"Transport":5.0}' in page and '"currency":"$"' in page
+
+
+def test_report_edits_round_trip_through_library(tmp_path, no_net_leak):
+    pw, launch = _chromium()
+    from make_sample_data import generate
+    from spendstories.cli import main
+    from spendstories.library import Library, load_config, read_transactions
+    from spendstories.pipeline import build
+
+    home = tmp_path / "lib"
+    main(["--home", str(home), "init"])
+    lib = Library(home)
+    generate(lib.inbox)
+    assert main(["--home", str(home), "inbox", "-q"]) == 0
+
+    with pw.sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(**launch)
+        except Exception as e:
+            pytest.skip(f"chromium unavailable: {e}")
+        page = browser.new_page()
+        errors = []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.goto(lib.report_path.as_uri())
+        assert page.locator("#ss-checks-n").inner_text() == "3"   # three "worth a look" checks
+
+        page.evaluate("location.hash = '#/transactions?q=TAJ HOTELS'")
+        page.wait_for_timeout(50)
+        page.click("button[data-edit] >> nth=0")
+        page.fill(".pop input", "Goa trip")
+        page.select_option(".pop [data-share]", "0.5")
+        page.click(".pop [data-save]")
+        taj = page.evaluate("window.__spendstories.TX.find(t => t.t.includes('TAJ'))")
+        assert taj["tags"] == ["Goa trip"] and taj["a"] == 13400
+
+        page.evaluate("location.hash = '#/budgets'")
+        page.click("[data-budgetadd] >> nth=0")
+        page.fill("input[data-budget='All spending']", "80000")
+        page.dispatch_event("input[data-budget='All spending']", "change")
+        page.evaluate("location.hash = '#/tag/Goa%20trip'")
+        page.wait_for_timeout(50)
+        assert "13.4K" in page.inner_text("#ss-view")
+
+        page.click("[data-export]")
+        rules_txt, budgets_txt = [page.input_value(f".modal textarea >> nth={i}") for i in (0, 1)]
+        assert not errors, errors
+        browser.close()
+
+    with open(lib.rules_path, "a") as f:
+        f.write("\n" + rules_txt + "\n")
+    lib.config_path.write_text(budgets_txt + "\n")
+    assert load_config(lib.config_path).budgets == {"All spending": 80000}
+    built = build(read_transactions(lib), [lib.rules_path], True, load_config(lib.config_path).budgets)
+    taj = next(t for t in built.transactions if "TAJ" in t.description)
+    assert taj.tags == ["Goa trip"] and taj.amount == 13400 and taj.share == 0.5

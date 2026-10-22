@@ -16,6 +16,13 @@ class Transaction:
     # expense | refund | income | transfer
     kind: str = "expense"
     merchant: str = ""
+    # Stable across runs and imports; used by tags/splits that name single transactions.
+    id: str = ""
+    tags: list[str] = field(default_factory=list)
+    # Your share of a shared expense (0-1). ``amount`` is already scaled by it;
+    # ``original_amount`` keeps what the statement said.
+    share: float = 1.0
+    original_amount: float | None = None
 
 
 @dataclass

@@ -18,38 +18,85 @@ well outside the usual), plus subscriptions and top merchants.
 - `.gitignore` excludes `statements/`, `reports/`, PDFs and generated reports so you
   don't commit your data by accident.
 
-## Install
+## Install (Mac)
 
-Python 3.11+.
+You need Python 3.11 or newer. The `python3` that comes with macOS is too old. Install a newer one
+with [Homebrew](https://brew.sh) (`brew install python`) or from python.org.
 
 ```bash
 git clone <this repo> && cd SpendStories
-python -m venv .venv && source .venv/bin/activate     # Windows: .venv\Scripts\activate
+python3 -m venv .venv && source .venv/bin/activate
 pip install -e .
+spendstories setup-mac          # creates ~/SpendStories with an Inbox and an "Update Report" file
 ```
 
-(Installing the dependencies is the only step that needs the internet. After that, everything
-runs offline.)
+Installing is the only step that uses the internet. After that, everything runs offline.
 
-## Use
+## Your monthly routine
+
+`setup-mac` creates a folder in your home directory:
+
+```
+~/SpendStories/
+  Inbox/                 ← save new statements here
+  Update Report.command  ← double-click: imports the Inbox and opens your report
+  Imported/2026-10/…     ← statements move here once they're in your history
+  report.html            ← your report (open it any time)
+  rules.toml             ← your categories, tags and shared-expense splits
+  config.toml            ← currency, budgets, PDF passwords
+  spendstories.db        ← every transaction you've ever imported
+```
+
+Each month:
+
+1. Download your card and bank statements and save them into `~/SpendStories/Inbox`.
+2. Double-click **Update Report**. The new transactions are added to your history and the
+   report opens.
+
+Want it fully hands-off? Run `spendstories setup-mac --auto`. After that, saving a file into
+the Inbox updates `report.html` within seconds, with nothing to click. (This is a macOS
+LaunchAgent; turn it off with the `launchctl unload` command it prints.)
+
+**Your history builds up.** Every transaction goes into a local database, so trends,
+same-month-last-year comparisons and budgets get better each month. Overlapping statements
+are fine: rows already in your history are skipped, so the same transaction is never counted
+twice. Two genuinely identical purchases in one statement (two coffees, same day, same price)
+are both kept. Importing the same file twice does nothing.
+
+### Commands
+
+| Command | What it does |
+|---|---|
+| `spendstories inbox [--open]` | Import everything in the Inbox, file it away, rebuild the report |
+| `spendstories import FILES… [--move]` | Import statements from anywhere |
+| `spendstories report [--open] [--csv all.csv]` | Rebuild the report (e.g. after editing rules or budgets) |
+| `spendstories status` | What's in your history: files, date range, months with no transactions |
+| `spendstories budget set "Shopping" 10000` | Set a monthly budget (`budget list`, `budget remove …`) |
+| `spendstories watch` | Keep running and import files as they land (alternative to `--auto`) |
+| `spendstories setup-mac [--auto]` | Create the folders and the double-clickable updater |
+| `spendstories --home PATH …` | Use a library somewhere other than `~/SpendStories` |
+
+Protected PDFs: add `pdf_passwords = ["…"]` to `config.toml` so the Inbox can open them
+without asking. That file stays on your Mac.
+
+### One-off reports
+
+You can also skip the library and make a report straight from some files:
 
 ```bash
-# Put your statements in a folder (CSV, XLSX, XLS or PDF; subfolders are fine)
-spendstories statements/ --currency ₹ --open
+spendstories statements/ --currency ₹ --open     # writes spend_report.html
 ```
-
-That writes `spend_report.html` and prints a summary in the terminal. Useful options:
 
 | Option | What it does |
 |---|---|
 | `-o report.html` | Where to write the report |
 | `--csv all.csv` | Also export every categorised transaction, handy for checking or for Excel |
-| `--rules my_rules.toml` | Your own category rules, checked before the built-in ones (repeatable) |
-| `--init-rules my_rules.toml` | Write a starter rules file to edit |
+| `--rules my_rules.toml` | Your own rules (categories, tags, splits), checked before the built-in ones |
+| `--config config.toml` | Currency and budgets |
 | `--currency ₹` | Currency symbol shown in the report |
-| `--pdf-password …` | Password for protected PDF statements (you're asked for it if it's needed and not given) |
+| `--pdf-password …` | Password for protected PDF statements (you're asked for it if it's needed) |
 | `--dayfirst` / `--monthfirst` | Force how ambiguous dates like 03/04/2026 are read (normally guessed per file) |
-| `--sign negative-spend` | For a file with a single signed Amount column, say which sign means spending (normally guessed) |
+| `--sign negative-spend` | For a file with a single signed Amount column, say which sign means spending |
 | `--no-dedupe` | Keep identical rows that appear in more than one file |
 
 Want to try it first? Generate a year of fake statements:
@@ -98,12 +145,36 @@ The browser's back button works as you'd expect.
   purchases, merchants used for the first time, and every transaction. Use ‹ › to step between months.
 - **Merchants**: recurring payments and subscriptions with price rises flagged, and a
   searchable, sortable list of every merchant.
-- **Transactions**: search and filter everything.
+- **Transactions**: search and filter everything, including by tag.
+- **Budgets**: each budget for the month you pick, with how much is left. While a month is in
+  progress it shows where you're heading at your current pace (✓ on track, ! at risk, ✗ over),
+  and a marker on each bar shows where you'd be if you spent evenly. You also get the last 6
+  months at a glance, and suggested budgets based on your typical month. Edit amounts right on
+  the page. Over-budget and at-risk categories show up in the Overview highlights and in the
+  terminal summary.
+- **Checks** (money leaks):
+  - possible double charges (same merchant and amount within 3 days)
+  - fees, interest and late-payment charges, with what each one usually means
+  - subscriptions that went up in price, new recurring payments (a free trial that turned
+    paid?) and what your subscriptions cost per year
+  - foreign-currency spending, which usually carries a 2-3.5% card markup
 
-**Fixing categories in the report:** click a category label next to any transaction, pick or
-type a new category, and every transaction from that merchant moves. Undo is right there.
-Your fixes are kept in that browser. Click **Save as a rules file** to download
-`my_rules.toml`, then pass it with `--rules` so all future reports use your fixes.
+  Mark items as reviewed to clear them. The tab shows how many still need a look.
+- **Tags**: what a trip, wedding or project really cost, across categories, with the daily
+  cost and how it compares with a normal month.
+- **Print a month**: on any month page, **Print summary** gives a clean one-page summary
+  (use "Save as PDF" in the print dialog to keep it).
+
+**Fixing things in the report:**
+- Click a **category** next to any transaction to move every transaction from that merchant.
+- Click **✎** to **tag** a transaction (e.g. *Goa trip*) or set **your share** of a shared
+  cost. Half, a third or any percentage counts only your part everywhere in the report; the
+  original amount is still shown.
+- Change **budgets** on the Budgets page.
+
+Every change has an undo. Changes are kept in that browser. Click **Save my changes** at the
+top to get the lines to paste into `rules.toml` / `config.toml` (it tells you which file),
+so every future report includes them.
 
 ### How money is counted
 
@@ -162,6 +233,27 @@ checked from top to bottom, your files first, and the first match wins. If the r
 lot of spending is uncategorised, open the **All transactions** table, filter by
 *Uncategorized* and add keywords for what you see.
 
+## Tags and shared expenses
+
+Tag many transactions at once, or count shared costs at your share, with rules in `rules.toml`:
+
+```toml
+[tags."Goa trip"]
+from = 2026-05-01
+to = 2026-05-20
+categories = ["Travel", "Dining & Food Delivery", "Transport"]   # optional
+# keywords = ["goa"], merchants = ["taj hotels goa"]              # optional
+
+[[splits]]                      # flatmate pays half the rent
+share = 0.5
+keywords = ["landlord"]
+```
+
+A transaction gets a tag when it falls within the dates (if given), is in one of the
+categories (if given), and matches a keyword or merchant (if any are given). Splits work the
+same way; the first matching split wins, and a split that names a specific transaction
+always beats a general one. The report's **Save my changes** writes these for you.
+
 ## Development
 
 ```bash
@@ -169,7 +261,9 @@ pip install -e .[dev]
 pytest
 ```
 
-Code layout: `loaders.py` (reading files) → `categorize.py` (rules) → `analysis.py`
-(totals, trends, spikes, recurring; used for the terminal summary) → `report.py`, which embeds
-the data and the app (`app/app.js`, `app/app.css`) in one HTML file. `offline.py` holds the
+Code layout: `loaders.py` (reading files) → `library.py` (the local database, config and
+budgets) → `categorize.py` and `extras.py` (categories, tags, splits) → `analysis.py` and
+`checks.py` (totals, trends, spikes, recurring, money leaks) → `report.py`, which embeds
+the data and the app (`app/app.js`, `app/app.css`) in one HTML file. `pipeline.py` ties the
+steps together and `cli.py` holds the commands. `offline.py` holds the
 network block. The browser test in `tests/` uses Playwright if it is installed and skips otherwise.

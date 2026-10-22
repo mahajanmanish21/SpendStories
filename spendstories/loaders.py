@@ -273,7 +273,7 @@ _MONEY = re.compile(r"(?<![\w.,])(-?\(?[\d,]*\d\.\d{2}\)?-?)(\s*(?:cr|dr)\b\.?)?
 _LEADING_DATE = re.compile(rf"^\s*({DATE_TOKEN.pattern})\s+(.*)$")
 
 
-def _pdf_text_lines(pages) -> list[tuple[str, str, list[tuple[float, str | None]]]]:
+def _pdf_text_lines(pages) -> list[tuple[str, str, list[tuple[float, str | None, str]]]]:
     """Pull out lines shaped like '<date> <description> <amount> [<amount>...]'."""
     out = []
     for page in pages:
@@ -298,7 +298,7 @@ def _pdf_text_lines(pages) -> list[tuple[str, str, list[tuple[float, str | None]
                     break
                 value, _ = parse_amount(mm.group(1))
                 marker = (mm.group(2) or "").strip().lower().rstrip(".") or None
-                amounts.insert(0, (value, marker))
+                amounts.insert(0, (value, marker, mm.group(0).strip()))
                 tail = tail[: mm.start()].rstrip()
             if not amounts or not tail.strip():
                 continue
@@ -306,9 +306,27 @@ def _pdf_text_lines(pages) -> list[tuple[str, str, list[tuple[float, str | None]
     return out
 
 
+def _has_running_balance(lines) -> bool:
+    """True when the last number on each line tracks a balance that moves by the amount before it."""
+    hits = tries = 0
+    prev = None
+    for _, _, amounts in lines:
+        if len(amounts) >= 2:
+            bal, amt = amounts[-1][0], abs(amounts[-2][0])
+            if prev is not None:
+                tries += 1
+                hits += abs(abs(bal - prev) - amt) < 0.015 or (
+                    len(amounts) >= 3 and abs(abs(bal - prev) - abs(abs(amounts[-3][0]) - abs(amounts[-2][0]))) < 0.015)
+            prev = bal
+        elif len(amounts) == 1:
+            prev = amounts[0][0] if prev is None else prev
+    return tries > 0 and hits / tries >= 0.5
+
+
 def _extract_pdf_text(pages, source, sign) -> tuple[list[Transaction], list[str]]:
     lines = _pdf_text_lines(pages)
     dayfirst = detect_dayfirst(l[0] for l in lines)
+    has_balance = _has_running_balance(lines)
     parsed = []
     prev_balance = None
     for date_str, desc, amounts in lines:
@@ -317,8 +335,12 @@ def _extract_pdf_text(pages, source, sign) -> tuple[list[Transaction], list[str]
             if len(amounts) == 1:
                 prev_balance = amounts[0][0]
             continue
-        if len(amounts) == 1:
-            value, marker = amounts[0]
+        if len(amounts) == 1 or not has_balance:
+            # Card layout: the last number is the amount; earlier numbers belong to the
+            # description (e.g. "AWS USD 12.00   1,015.00").
+            value, marker, _ = amounts[-1]
+            if len(amounts) > 1:
+                desc = f"{desc} {' '.join(a[2] for a in amounts[:-1])}"
             parsed.append([d, desc, value, marker, False])
             continue
         # Bank layout: [..., amount, balance] or [debit, credit, balance].
@@ -327,7 +349,7 @@ def _extract_pdf_text(pages, source, sign) -> tuple[list[Transaction], list[str]
             debit, credit = abs(amounts[-3][0]), abs(amounts[-2][0])
             parsed.append([d, desc, debit - credit, None, True])
         else:
-            value, marker = amounts[-2]
+            value, marker, _ = amounts[-2]
             value = abs(value)
             if marker is None and prev_balance is not None and abs(abs(balance - prev_balance) - value) < 0.015:
                 parsed.append([d, desc, value if balance < prev_balance else -value, None, True])
