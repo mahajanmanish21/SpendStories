@@ -1,0 +1,205 @@
+# SpendStories default categorisation rules.
+#
+# Rules are checked top to bottom; the first category with a matching keyword
+# wins. Keywords are case-insensitive. Keywords of 5+ characters match anywhere
+# in the description (so "swiggy" matches "UPI/SWIGGYINSTAMART/123"); shorter
+# ones must appear as a separate word (so "ola" does not match "coca cola").
+# Prefix a keyword with "re:" to use a regular expression.
+#
+# kind controls how a category counts:
+#   expense    (default) counted as spending; credits in it count as refunds
+#   transfer   moving your own money (card bill payments, self transfers) - ignored
+#   investment money set aside (SIPs, brokerage) - shown separately, not spending
+#   income     salary, interest, dividends
+#
+# Don't edit this file to customise - copy the sections you want into your own
+# rules file and pass it with --rules. Your rules are checked first.
+
+[categories."Transfers & Card Payments"]
+kind = "transfer"
+keywords = [
+  "payment received", "payment - thank you", "payment thank you", "thank you for your payment",
+  "autopay", "auto pay", "auto debit cc", "credit card payment", "cc payment", "card payment",
+  "bill payment - credit card", "cred club", "credclub", "billdesk cc", "ccpayment",
+  "self transfer", "own account", "transfer to self", "sweep", "fd booked", "fd closure",
+  "re:\\bto self\\b", "re:\\binternal transfer\\b", "re:\\bonline payment\\b.*\\bcard\\b",
+  "re:^payment\\b", "re:\\bepay\\b", "re:\\bach credit card\\b",
+]
+
+[categories.Income]
+kind = "income"
+keywords = [
+  "salary", "payroll", "sal cr", "interest credit", "int.pd", "int pd", "interest paid",
+  "interest earned", "dividend", "div ", "neft cr", "re:\\bbonus\\b", "re:\\breimb", "tax refund",
+  "income tax refund", "cashback", "cash back", "reward redemption",
+]
+
+[categories.Investments]
+kind = "investment"
+keywords = [
+  "zerodha", "groww", "upstox", "kuvera", "coin by", "smallcase", "angel one", "angelone",
+  "mutual fund", "re:\\bsip\\b", "nps trust", "ppf", "vanguard", "fidelity", "schwab", "robinhood",
+  "etrade", "e*trade", "wealthfront", "betterment", "indmoney", "paytm money", "icclzerodha",
+  "bse ltd", "nse clearing", "clearing corp",
+]
+
+[categories."Rent & Housing"]
+keywords = [
+  "rent", "nobroker", "nestaway", "housing society", "maintenance charges", "society maint",
+  "landlord", "property management", "mortgage", "hoa", "re:\\bmygate\\b",
+]
+
+[categories."EMI & Loans"]
+keywords = [
+  "re:\\bemi\\b", "loan", "bajaj finserv", "bajaj finance", "home credit", "re:\\bnach\\b",
+  "re:\\becs\\b", "student loan", "navient", "sofi",
+]
+
+[categories.Groceries]
+keywords = [
+  "bigbasket", "blinkit", "grofers", "zepto", "instamart", "dmart", "d-mart", "avenue supermarts",
+  "reliance fresh", "reliance smart", "jiomart", "more retail", "spencer", "nature's basket",
+  "natures basket", "star bazaar", "ratnadeep", "milkbasket", "country delight", "dunzo",
+  "supermarket", "grocery", "groceries", "kirana", "whole foods", "trader joe", "safeway",
+  "kroger", "costco", "walmart", "tesco", "sainsbury", "aldi", "lidl", "waitrose", "asda",
+  "publix", "wegmans", "instacart", "carrefour", "lulu hyper",
+]
+
+[categories."Dining & Food Delivery"]
+keywords = [
+  "swiggy", "zomato", "eatsure", "faasos", "dominos", "domino's", "pizza", "mcdonald",
+  "burger", "kfc", "subway", "starbucks", "chaayos", "cafe coffee day", "third wave",
+  "blue tokai", "haldiram", "barbeque nation", "restaurant", "resto", "cafe", "coffee",
+  "bakery", "dhaba", "biryani", "kitchen", "eatery", "food court", "doordash", "grubhub",
+  "uber eats", "ubereats", "deliveroo", "just eat", "chipotle", "dunkin", "taco bell",
+  "re:\\bbar\\b", "pub ", "brewery", "dining",
+]
+
+[categories.Transport]
+keywords = [
+  "uber", "re:\\bola\\b", "olacabs", "ola cabs", "rapido", "blusmart", "meru", "lyft",
+  "metro", "dmrc", "bmrcl", "mmrda", "irctc", "redbus", "abhibus", "railway", "fastag",
+  "parking", "toll", "nhai", "taxi", "cab ", "bus ticket", "transit", "mta ", "tfl",
+  "oyster", "bolt.eu",
+]
+
+[categories.Fuel]
+keywords = [
+  "petrol", "diesel", "fuel", "indian oil", "iocl", "bharat petroleum", "bpcl", "hpcl",
+  "hindustan petroleum", "shell", "reliance bp", "jio-bp", "nayara", "chevron", "exxon",
+  "texaco", "gas station", "re:\\bbp\\b",
+]
+
+[categories.Travel]
+keywords = [
+  "makemytrip", "goibibo", "cleartrip", "yatra", "easemytrip", "ixigo", "airbnb", "booking.com",
+  "agoda", "expedia", "oyo", "treebo", "fabhotels", "taj hotels", "marriott", "hilton", "hyatt",
+  "hotel", "resort", "indigo", "interglobe", "air india", "vistara", "spicejet", "akasa",
+  "airasia", "emirates", "lufthansa", "british airways", "united airlines", "delta air",
+  "american airlines", "southwest", "ryanair", "easyjet", "airline", "airways", "airport",
+  "thomas cook", "visa fee", "forex",
+]
+
+[categories.Shopping]
+keywords = [
+  "amazon", "amzn", "flipkart", "myntra", "ajio", "nykaa", "meesho", "tata cliq", "tatacliq",
+  "snapdeal", "firstcry", "lenskart", "decathlon", "ikea", "pepperfry", "urban ladder",
+  "croma", "reliance digital", "vijay sales", "apple store", "westside", "pantaloons",
+  "lifestyle", "shoppers stop", "max fashion", "h&m", "zara", "uniqlo", "trends", "big bazaar",
+  "ebay", "etsy", "target", "best buy", "home depot", "lowe's", "macy", "nordstrom", "shein",
+  "temu", "aliexpress", "mall", "retail", "store", "mart",
+]
+
+[categories."Utilities & Bills"]
+keywords = [
+  "electricity", "bescom", "msedcl", "mahadiscom", "tata power", "adani electricity",
+  "bses", "tneb", "tangedco", "torrent power", "cesc", "water bill", "water board",
+  "gas bill", "mahanagar gas", "indraprastha gas", "igl", "piped gas", "lpg", "indane",
+  "hp gas", "bharat gas", "utility", "utilities", "con edison", "pg&e", "duke energy",
+  "british gas", "bill pay", "billpay", "bbps",
+]
+
+[categories."Phone & Internet"]
+keywords = [
+  "airtel", "jio", "vodafone", "re:\\bvi\\b", "vodafone idea", "bsnl", "mtnl", "act fibernet",
+  "hathway", "tata play", "tatasky", "tata sky", "dish tv", "d2h", "excitel", "broadband",
+  "fibernet", "recharge", "postpaid", "prepaid", "verizon", "at&t", "t-mobile", "comcast",
+  "xfinity", "spectrum", "mobile bill",
+]
+
+[categories."Subscriptions & Entertainment"]
+keywords = [
+  "netflix", "spotify", "hotstar", "disney", "prime video", "amazon prime", "primevideo",
+  "sonyliv", "zee5", "jiocinema", "youtube", "google play", "apple.com", "itunes", "icloud",
+  "google one", "google storage", "microsoft", "office 365", "adobe", "dropbox", "openai",
+  "chatgpt", "anthropic", "claude.ai", "github", "notion", "audible", "kindle", "hulu",
+  "hbo", "max.com", "paramount", "peacock", "bookmyshow", "pvr", "inox", "cinepolis",
+  "cinema", "movies", "steam", "playstation", "xbox", "nintendo", "gaming", "concert",
+  "ticketmaster", "eventbrite", "insider.in", "district",
+]
+
+[categories."Health & Medical"]
+keywords = [
+  "pharmacy", "pharma", "chemist", "medical", "medicals", "apollo", "medplus", "netmeds",
+  "1mg", "tata 1mg", "pharmeasy", "practo", "hospital", "clinic", "diagnostic", "pathlab",
+  "lal path", "thyrocare", "dental", "dentist", "doctor", "healthcare", "cvs", "walgreens",
+  "boots", "optical", "cult.fit", "cultfit", "curefit", "gym", "fitness", "healthify",
+]
+
+[categories.Insurance]
+keywords = [
+  "insurance", "lic of india", "re:\\blic\\b", "policybazaar", "hdfc life", "icici pru",
+  "icici lombard", "max life", "sbi life", "star health", "niva bupa", "care health",
+  "bajaj allianz", "tata aig", "digit insurance", "acko", "geico", "state farm", "allstate",
+  "progressive", "premium",
+]
+
+[categories.Education]
+keywords = [
+  "school", "college", "university", "tuition", "coaching", "byju", "unacademy", "vedantu",
+  "coursera", "udemy", "edx", "skillshare", "duolingo", "upgrad", "simplilearn",
+  "exam fee", "books", "stationery", "masterclass",
+]
+
+[categories."Personal Care"]
+keywords = [
+  "salon", "spa", "barber", "parlour", "parlor", "urban company", "urbanclap", "lakme",
+  "naturals", "jawed habib", "looks salon", "grooming", "cosmetic", "sephora", "ulta",
+]
+
+[categories."Home & Services"]
+keywords = [
+  "urban company", "housejoy", "plumber", "electrician", "carpenter", "laundry", "dry clean",
+  "pest control", "repair", "maid", "cook salary", "driver salary", "hardware", "furniture",
+]
+
+[categories."Gifts & Donations"]
+keywords = [
+  "donation", "charity", "temple", "church", "mosque", "gurudwara", "trust", "foundation",
+  "ngo", "giveindia", "ketto", "milaap", "gift", "ferns n petals", "fnp", "igp.com",
+]
+
+[categories."Cash Withdrawal"]
+keywords = [
+  "atm", "cash withdrawal", "cash wdl", "atw", "nwd", "re:\\bcwdr\\b", "cash advance",
+]
+
+[categories."Fees & Charges"]
+keywords = [
+  "annual fee", "joining fee", "late fee", "late payment", "finance charge", "interest charge",
+  "overlimit", "over limit", "gst", "igst", "cgst", "sgst", "service tax", "markup fee",
+  "forex markup", "cross currency", "fuel surcharge", "surcharge", "bank charges", "chrg",
+  "charges", "penalty", "sms alert", "min bal", "non maintenance", "re:\\bfee\\b",
+]
+
+[categories.Taxes]
+keywords = [
+  "income tax", "advance tax", "tds", "property tax", "municipal corp", "gst payment",
+  "challan", "irs ", "hmrc",
+]
+
+[categories."Transfers to People"]
+keywords = [
+  "re:^upi[/-]", "re:\\bupi\\b", "neft", "imps", "rtgs", "zelle", "venmo", "paypal", "wise",
+  "transferwise", "gpay", "google pay", "phonepe", "paytm", "bhim",
+]

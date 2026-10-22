@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+.venv/
+
+# Never commit real financial data or generated reports.
+statements/
+reports/
+*.pdf
+spend_report*.html
+transactions*.csv
+!examples/*.csv
