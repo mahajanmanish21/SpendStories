@@ -59,20 +59,51 @@ python examples/make_sample_data.py
 spendstories examples/sample_statements --currency ₹ --open
 ```
 
-## What's in the report
+## Using the report
 
-- **Headline numbers**: total spend, monthly average, income, amount invested, what's left over.
-- **Highlights**: the most important findings in plain sentences.
-- **Monthly spending by category**: stacked chart with hover details and a table view.
-- **Spikes**: category-months well above that category's usual level (at least 1.5× the median
-  of the other months and statistically unusual), with the transactions that caused each one.
-- **Trends**: categories that have been rising or falling steadily. A single big month doesn't
-  count as a trend because the slope is a robust (Theil–Sen) estimate.
-- **Categories**: total, share, monthly average, latest month vs. average, sparkline, trend.
-- **Unusually large transactions**: big for their category, or a big chunk of a month's budget.
-- **Recurring payments & subscriptions**: weekly, monthly, quarterly or yearly payments,
-  with price rises flagged (e.g. a streaming plan going from 499 to 649).
-- **Top merchants**, and a searchable, filterable list of **all transactions**.
+The report is a small app in a single HTML file. It works offline: open it by double-clicking.
+Everything is clickable, so you can start from the big picture and go down to single transactions:
+
+```
+Overview ──► a month ──► a category ──► a merchant ──► its transactions
+    │            ▲             ▲
+    └─► Trends ──┴─────────────┘  (any bar, cell or row takes you deeper)
+```
+
+The **Period** picker (all time, last 12/6/3 months, this year, custom) applies to every view.
+The browser's back button works as you'd expect.
+
+- **Overview** (the high-level view): what you spent, your average month, the overall trend,
+  how the latest month compares, income and what's left over. Below that are plain-language
+  **highlights** (each one links to its details), a month-by-month chart split by category,
+  where the money goes, and your recurring payments.
+- **Trends**:
+  - **Direction** of your overall spending, using a robust trend line that a single holiday
+    or laptop can't tilt. Toggle a 3-month moving average and the average on the chart.
+    You also get a "next month if the trend holds" estimate and a comparison with the same
+    month last year (needs 13+ months of statements).
+  - **What's driving the change**: how much more or less you spend per category, comparing
+    the last 1, 3 or 6 months with the same length of time before. **One-off spikes are set
+    aside by default**, so you see changes in your habits. Switch them back in with one click.
+  - **Category trends** table: each category labelled *Rising*, *Falling*, *Spiky*,
+    *Steady* or *Irregular*. You can sort and filter it.
+  - **Seasonality map**: a category × month heatmap, with spikes marked, for spotting which
+    months each category peaks.
+  - **Merchant trends**: where you're spending more, new merchants, and ones you've stopped using.
+- **Category** page: monthly chart with trend line and forecast, biggest month, and
+  **"Why is it changing?"**, which splits the change into *buying more often* vs.
+  *each purchase costing more*, with charts of both. Also its merchants and transactions.
+- **Merchant** page: the same detail for one merchant, plus recurring-payment info.
+- **Month** page: how the month compares with an average month for each category, its biggest
+  purchases, merchants used for the first time, and every transaction. Use ‹ › to step between months.
+- **Merchants**: recurring payments and subscriptions with price rises flagged, and a
+  searchable, sortable list of every merchant.
+- **Transactions**: search and filter everything.
+
+**Fixing categories in the report:** click a category label next to any transaction, pick or
+type a new category, and every transaction from that merchant moves. Undo is right there.
+Your fixes are kept in that browser. Click **Save as a rules file** to download
+`my_rules.toml`, then pass it with `--rules` so all future reports use your fixes.
 
 ### How money is counted
 
@@ -117,12 +148,16 @@ keywords = ["toy store", "school fees"]
 [categories."Transfers & Card Payments"]
 kind = "transfer"                 # ignored in spending totals
 keywords = ["my other bank", "re:^to savings"]
+
+[categories.Music]
+merchants = ["spotify"]           # exact merchant names as shown in the report
 ```
 
 Keywords are case-insensitive. Keywords of 5 or more characters match anywhere in the
 description, so `swiggy` matches `UPI/SWIGGYINSTAMART/123`. Shorter ones must be a separate
 word, so `ola` doesn't match `coca cola`. Prefix a keyword with `re:` to use a regular expression.
-`kind` can be `expense` (the default), `transfer`, `investment` or `income`. The rules are
+`merchants` lists exact merchant names as shown in the report. The report's
+**Save as a rules file** button writes these for you. `kind` can be `expense` (the default), `transfer`, `investment` or `income`. The rules are
 checked from top to bottom, your files first, and the first match wins. If the report says a
 lot of spending is uncategorised, open the **All transactions** table, filter by
 *Uncategorized* and add keywords for what you see.
@@ -135,4 +170,6 @@ pytest
 ```
 
 Code layout: `loaders.py` (reading files) → `categorize.py` (rules) → `analysis.py`
-(totals, trends, spikes, recurring) → `report.py` (HTML). `offline.py` holds the network block.
+(totals, trends, spikes, recurring; used for the terminal summary) → `report.py`, which embeds
+the data and the app (`app/app.js`, `app/app.css`) in one HTML file. `offline.py` holds the
+network block. The browser test in `tests/` uses Playwright if it is installed and skips otherwise.

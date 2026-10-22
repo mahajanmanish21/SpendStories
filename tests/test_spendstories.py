@@ -295,3 +295,89 @@ def test_bank_pdf_sign_from_running_balance(tmp_path):
     res = load_file(f)
     assert [(t.description, t.amount) for t in res.transactions] == [
         ("UPI/ZOMATO/123", 450.0), ("NEFT SALARY ACME", -50000.0), ("ATM WDL", 2000.0)]
+
+
+# ---------------------------------------------------------------- report app (needs Chromium)
+
+def _chromium():
+    pw = pytest.importorskip("playwright.sync_api")
+    exe = Path("/opt/pw-browsers/chromium")
+    return pw, ({"executable_path": str(exe)} if exe.exists() else {})
+
+
+def test_report_app_interactions(tmp_path):
+    pw, launch = _chromium()
+    from make_sample_data import generate
+    from spendstories import offline
+    from spendstories.analysis import analyze
+    from spendstories.cli import main
+
+    saved = (socket.socket, socket.create_connection, socket.getaddrinfo,
+             socket.gethostbyname, socket.gethostbyname_ex)
+    try:
+        generate(tmp_path / "in")
+        out = tmp_path / "report.html"
+        assert main([str(tmp_path / "in"), "-o", str(out), "-q"]) == 0
+    finally:
+        (socket.socket, socket.create_connection, socket.getaddrinfo,
+         socket.gethostbyname, socket.gethostbyname_ex) = saved
+        offline._installed = False
+
+    # Python's view of the same data, to cross-check the in-page maths.
+    txns = []
+    for f in sorted((tmp_path / "in").iterdir()):
+        txns += load_file(f).transactions
+    txns, _ = dedupe(txns)
+    categorize(txns, load_rules())
+    py = analyze(txns)
+
+    with pw.sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(**launch)
+        except Exception as e:  # browser not installed
+            pytest.skip(f"chromium unavailable: {e}")
+        page = browser.new_page()
+        errors, requests = [], []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.on("request", lambda r: requests.append(r.url) if not r.url.startswith("file:") else None)
+        page.goto(out.as_uri())
+
+        total = page.evaluate("window.__spendstories.D().spendTotal")
+        assert total == pytest.approx(py.overview["total_spend"], abs=0.01)
+        trends = page.evaluate("Object.fromEntries(window.__spendstories.D().cats.map(c => [c.name, c.stats.label]))")
+        assert trends["Dining & Food Delivery"] == "rising"
+        assert trends["Travel"] == "spiky"
+
+        for route in ["#/trends", "#/categories", "#/category/Travel", "#/merchants", "#/merchant/netflix",
+                      "#/month/2026-05", "#/transactions?cat=Shopping"]:
+            page.evaluate(f"location.hash = {route!r}")
+            page.wait_for_timeout(50)
+            assert page.locator("#ss-view h1").count() == 1, route
+
+        # Period filter
+        page.select_option("#ss-range", "3")
+        assert page.evaluate("window.__spendstories.D().months.length") == 3
+        page.select_option("#ss-range", "all")
+
+        # Spikes set aside by default: the August laptop shouldn't make Shopping the top riser.
+        page.evaluate("location.hash = '#/overview'")
+        assert "Biggest increase: Shopping" not in page.inner_text("#ss-view")
+
+        # Re-categorise a merchant from the transactions table, then export the fix as rules.
+        page.evaluate("location.hash = '#/merchant/spotify'")
+        page.click("button[data-recat]")
+        page.fill(".pop input", "Music")
+        page.click(".pop button.primary")
+        assert page.evaluate("window.__spendstories.D().catMap.has('Music')")
+        page.click("[data-export]")
+        toml = page.input_value(".modal textarea")
+        assert '[categories."Music"]' in toml and '"spotify"' in toml
+
+        assert not errors, errors
+        assert not requests, requests
+        browser.close()
+
+    rules = tmp_path / "my_rules.toml"
+    rules.write_text(toml)
+    categorize(txns, load_rules([rules]))
+    assert {t.category for t in txns if t.merchant == "spotify"} == {"Music"}

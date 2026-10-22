@@ -25,7 +25,7 @@ class Settings:
     # Ignore spikes / trends smaller than this share of an average month's total spend.
     min_share: float = 0.02
     # Monthly change (as % of the category's average) for a trend to be reported.
-    trend_pct: float = 8.0
+    trend_pct: float = 5.0
     top_n: int = 15
 
 

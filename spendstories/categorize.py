@@ -19,7 +19,11 @@ KINDS = {"expense", "transfer", "investment", "income"}
 class Rule:
     category: str
     kind: str
-    pattern: re.Pattern
+    pattern: re.Pattern | None
+    merchants: frozenset[str] = frozenset()
+
+    def matches(self, description: str, merchant: str) -> bool:
+        return merchant in self.merchants or (self.pattern is not None and bool(self.pattern.search(description)))
 
 
 def _keyword_pattern(keyword: str) -> str:
@@ -39,13 +43,17 @@ def _rules_from_toml(data: dict, source: str) -> list[Rule]:
         if kind not in KINDS:
             raise ValueError(f"{source}: category {name!r} has unknown kind {kind!r}")
         keywords = spec.get("keywords") or []
-        if not keywords:
+        # Exact merchant names, as shown in the report (the report's "save as rules file" writes these).
+        merchants = frozenset(m.strip().lower() for m in spec.get("merchants") or [])
+        if not keywords and not merchants:
             continue
-        try:
-            pattern = re.compile("|".join(f"(?:{_keyword_pattern(k)})" for k in keywords), re.I)
-        except re.error as e:
-            raise ValueError(f"{source}: bad regex in category {name!r}: {e}") from e
-        rules.append(Rule(name, kind, pattern))
+        pattern = None
+        if keywords:
+            try:
+                pattern = re.compile("|".join(f"(?:{_keyword_pattern(k)})" for k in keywords), re.I)
+            except re.error as e:
+                raise ValueError(f"{source}: bad regex in category {name!r}: {e}") from e
+        rules.append(Rule(name, kind, pattern, merchants))
     return rules
 
 
@@ -92,7 +100,7 @@ def categorize(transactions: list[Transaction], rules: list[Rule]) -> None:
     """Assign category, kind and merchant to each transaction in place."""
     for t in transactions:
         t.merchant = merchant_key(t.description)
-        rule = next((r for r in rules if r.pattern.search(t.description)), None)
+        rule = next((r for r in rules if r.matches(t.description, t.merchant)), None)
         if rule is None:
             if t.amount < 0:
                 t.category, t.kind = OTHER_INCOME, "income"

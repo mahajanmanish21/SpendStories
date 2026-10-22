@@ -64,7 +64,7 @@ def main(argv: list[str] | None = None) -> int:
     block_network()
 
     from .analysis import Settings, analyze, dedupe
-    from .categorize import categorize, load_rules
+    from .categorize import categorize, category_kinds, load_rules
     from .formatting import money, pct, set_currency
     from .loaders import collect_files, load_file
     from .report import render_html
@@ -131,7 +131,10 @@ def main(argv: list[str] | None = None) -> int:
     analysis = analyze(transactions, Settings())
 
     out = Path(args.output)
-    out.write_text(render_html(analysis, notes, args.currency), encoding="utf-8")
+    kinds = category_kinds(rules)
+    for t in transactions:
+        kinds.setdefault(t.category, "expense")
+    out.write_text(render_html(transactions, kinds, analysis.recurring, notes, args.currency), encoding="utf-8")
 
     if args.csv:
         with open(args.csv, "w", newline="", encoding="utf-8") as fh:

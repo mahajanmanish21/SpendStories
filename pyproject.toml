@@ -24,4 +24,4 @@ spendstories = "spendstories.cli:main"
 include = ["spendstories*"]
 
 [tool.setuptools.package-data]
-spendstories = ["*.toml"]
+spendstories = ["*.toml", "app/*.js", "app/*.css"]
